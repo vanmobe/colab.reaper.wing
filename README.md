@@ -546,6 +546,8 @@ Now your shortcut triggers that action!
 
 ## Architecture
 
+> **📖 For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - covers directory structure, design patterns, build system integration, and development guidelines.
+
 ### How Wing Connector Works
 
 ```
@@ -572,31 +574,46 @@ Now your shortcut triggers that action!
 └─────────────────────┘
 ```
 
+### Codebase Organization
+
+The extension is organized into **functional domains** for maintainability and scalability:
+
+- **Extension Layer** (`src/extension/`) - REAPER plugin bootstrap
+- **Core OSC** (`src/core/`) - UDP/OSC protocol implementation
+- **Track Management** (`src/track/`) - Track creation and synchronization
+- **Utilities** (`src/utilities/`) - Configuration, logging, and helpers
+- **UI Layer** (`src/ui/`) - Platform-specific dialogs (macOS Objective-C++)
+
+Headers are split into:
+- **Public API** (`include/wingconnector/`) - Main interfaces
+- **Internal Implementation** (`include/internal/`) - Supporting utilities
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete directory structure and design patterns.
+
 ### Component Overview
 
-**main.cpp - Extension Entry Point**
-- Initializes Reaper extension framework
+**Extension Layer** (`src/extension/`)
+- Initializes REAPER extension framework
 - Registers actions and keyboard shortcuts
 - Manages UI dialogs
-- Handles command routing
 
-**wing_osc.cpp - OSC Communication Layer**
-- Sends OSC queries to Wing console
-- Receives and parses OSC responses
+**Core OSC** (`src/core/`)
+- Sends/receives OSC queries to Wing console
+- Parses Wing OSC responses
 - Implements Wing OSC protocol
-- Handles network timeouts and errors
+- Handles network errors and timeouts
 
-**track_manager.cpp - Track Creation Engine**
+**Track Manager** (`src/track/`)
 - Creates Reaper tracks matching Wing channels
 - Applies channel names, colors, routing
 - Manages stereo pairing logic
 - Handles track updates and refreshes
 
-**wing_config.cpp - Configuration Manager**
-- Loads and parses `config.json`
-- Validates all configuration values
-- Provides config to other components
-- Handles config reloads
+**Utilities** (`src/utilities/`)
+- `wing_config.cpp` - Configuration file I/O and validation
+- `logger.cpp` - Logging system
+- `platform_util.cpp` - macOS native dialogs
+- `string_format.cpp` - String utilities
 
 **reaper_extension.cpp - Main Class**
 - Orchestrates overall extension behavior
