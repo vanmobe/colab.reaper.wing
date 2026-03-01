@@ -15,11 +15,13 @@ A professional C++ Reaper extension that connects to a Behringer Wing console vi
 5. [Installation & Setup](#installation--setup)
 6. [Configuration](#configuration)
 7. [Usage Guide](#usage-guide)
-8. [Architecture](#architecture)
-9. [OSC Protocol](#osc-protocol)
-10. [Troubleshooting](#troubleshooting)
-11. [Development](#development)
-12. [Credits & License](#credits--license)
+8. [Project Structure](#project-structure)
+9. [Architecture](#architecture)
+10. [OSC Protocol](#osc-protocol)
+11. [Documentation](#documentation)
+12. [Troubleshooting](#troubleshooting)
+13. [Development](#development)
+14. [Credits & License](#credits--license)
 
 ---
 
@@ -647,6 +649,80 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete directory stru
 
 ---
 
+## Project Structure
+
+Wing Connector uses a **layered, modular architecture** for maintainability and scalability. For comprehensive architectural documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Codebase Organization
+
+```
+src/
+├── extension/           # REAPER plugin integration
+│   ├── main.cpp        # Extension entry point, command registration
+│   └── reaper_extension.cpp
+├── core/               # OSC communication and protocol handling
+│   ├── wing_osc.cpp    # UDP/OSC client implementation
+│   ├── osc_routing.cpp # Message routing and dispatcher
+│   └── osc_builder.cpp # OSC packet construction
+├── utilities/          # Cross-platform support libraries
+│   ├── wing_config.cpp      # Configuration file I/O
+│   ├── logger.cpp           # Logging system
+│   ├── platform_util.cpp    # Platform-specific utilities
+│   └── string_format.cpp    # String utilities
+├── track/              # REAPER track management
+│   └── track_manager.cpp    # Track creation and synchronization
+└── ui/                 # Platform-specific user interfaces
+    ├── settings_dialog_macos.mm    # Settings dialog (macOS)
+    └── wing_connector_dialog_macos.mm # Connection dialog (macOS)
+
+include/
+├── wingconnector/      # Public API headers
+│   ├── wing_osc.h
+│   ├── wing_config.h
+│   ├── track_manager.h
+│   └── reaper_extension.h
+└── internal/           # Internal implementation headers
+    ├── logger.h
+    ├── platform_util.h
+    ├── string_format.h
+    ├── osc_routing.h
+    ├── osc_builder.h
+    ├── osc_helpers.h
+    ├── settings_dialog_macos.h
+    └── wing_connector_dialog_macos.h
+```
+
+### Functional Domains
+
+**Extension Layer** (`src/extension/`)
+- REAPER plugin bootstrap and lifecycle management
+- Command registration and keyboard shortcuts
+- UI dialog coordination
+
+**Core OSC** (`src/core/`)
+- UDP/OSC protocol implementation
+- Wing console command queries
+- Real-time update subscriptions
+- Message routing and parsing
+
+**Track Management** (`src/track/`)
+- Reaper track creation from Wing channel data
+- Track property synchronization (names, colors, routing)
+- Stereo channel pairing logic
+
+**Utilities** (`src/utilities/`)
+- Configuration file loading and validation
+- Console logging with debug levels
+- Platform-specific utilities (macOS native dialogs)
+- String parsing and formatting
+
+**UI Layer** (`src/ui/`)
+- Platform-specific user interfaces (macOS Objective-C++)
+- Connection and settings dialogs
+- User feedback and error handling
+
+---
+
 ## OSC Protocol
 
 Wing Connector implements the Behringer Wing OSC (Open Sound Control) protocol, allowing communication over standard UDP network connections.
@@ -956,6 +1032,64 @@ If you're still stuck:
 4. **Check Documentation:**
    - See [docs/WING_OSC_PROTOCOL.md](docs/WING_OSC_PROTOCOL.md) for protocol details
    - Patrick Gillot's Wing manual for OSC reference
+
+---
+
+## Documentation
+
+Comprehensive documentation covers both usage and development:
+
+### User & Operator Documentation
+
+- **[README.md](README.md)** - This file; quick start and user guide
+- **[QUICKSTART.md](QUICKSTART.md)** - 5-minute getting started guide
+- **[docs/WING_OSC_PROTOCOL.md](docs/WING_OSC_PROTOCOL.md)** - OSC protocol reference based on Patrick Gillot's manual
+
+### Architecture & Development Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Complete architectural overview
+  - Directory structure (5 functional layers)
+  - Design patterns and module organization
+  - Build system integration
+  - Development workflow guidelines
+  - Future improvement opportunities
+
+### Inline Code Documentation
+
+All source files include comprehensive inline documentation:
+
+- **Function-level comments** - Purpose, parameters, return values, and examples
+- **Module headers** - Overview of responsibilities and key concepts
+- **Complex algorithms** - Detailed explanations of logic and REAPER API usage
+
+Key documented files:
+- `src/extension/main.cpp` - Plugin lifecycle and command routing
+- `src/core/wing_osc.cpp` - OSC protocol implementation details
+- `src/track/track_manager.cpp` - Track creation and REAPER API usage
+- `include/wingconnector/wing_osc.h` - Public interface and data structures
+- `include/wingconnector/track_manager.h` - Track management API
+
+### Configuration Reference
+
+- **config.json** - Runtime settings and preferences (see [Configuration](#configuration) section)
+
+### For New Developers
+
+Start with this reading order:
+
+1. **Quick Overview:**
+   - [QUICKSTART.md](QUICKSTART.md) - Learn what the extension does
+   - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Functional Domains" section
+
+2. **Understand the Code:**
+   - `include/wingconnector/wing_osc.h` - Public interface for OSC communication
+   - `src/extension/main.cpp` - How REAPER invokes the plugin
+   - `src/track/track_manager.cpp` - How tracks are created
+
+3. **Deep Dive (if needed):**
+   - [docs/WING_OSC_PROTOCOL.md](docs/WING_OSC_PROTOCOL.md) - Protocol details
+   - Source file comments for specific implementations
+   - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Complete design patterns and data flow
 
 ---
 

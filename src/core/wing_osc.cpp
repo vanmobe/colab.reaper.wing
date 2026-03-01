@@ -1,6 +1,28 @@
 /*
  * Wing OSC Communication Implementation
  * Based on Patrick Gillot's Behringer Wing OSC Manual
+ * 
+ * This module implements the Behringer Wing OSC (Open Sound Control) protocol.
+ * It handles:
+ * 1. UDP/OSC client connection to Wing console
+ * 2. Sending OSC queries to discover channel information
+ * 3. Receiving and parsing OSC responses
+ * 4. Real-time subscription to Wing updates
+ * 5. Channel data caching and callbacks
+ * 
+ * Protocol Details:
+ * - Transport: UDP/OSC (default port 2223)
+ * - Handshake: Sends "WING?" probe on port 2222 to locate console
+ * - Channel data: Queried via /ch/[number]/[property] OSC addresses
+ * - USB routing: Calculated from channel allocation info
+ * - Colors: Wing palette (48 colors) mapped to REAPER RGB
+ * 
+ * Key responsibilities:
+ * - Establish and maintain connection to Wing console
+ * - Build and send OSC query messages
+ * - Parse and validate OSC responses
+ * - Manage channel information cache
+ * - Trigger callbacks when data is received
  */
 
 #include "wingconnector/wing_osc.h"
@@ -36,19 +58,34 @@
 #endif
 
 namespace {
-constexpr uint16_t kWingHandshakePort = 2222;
-constexpr const char* kWingHandshakeProbe = "WING?";
-constexpr int kHandshakeTimeoutMs = 1500;
+constexpr uint16_t kWingHandshakePort = 2222;  // Wing discovery port
+constexpr const char* kWingHandshakeProbe = "WING?";  // Discovery message
+constexpr int kHandshakeTimeoutMs = 1500;  // Discovery timeout
 }
 
 namespace WingConnector {
 
-// OSC packet listener implementation
+/**
+ * WingOscListener - Internal OSC packet receiver
+ * 
+ * Implements osc::OscPacketListener to receive and process incoming OSC messages
+ * from the Wing console. Routes messages to appropriate handlers based on address.
+ */
 class WingOscListener : public osc::OscPacketListener {
 public:
     WingOscListener(WingOSC* parent) : parent_(parent) {}
     
 protected:
+    /**
+     * ProcessMessage() - Handle incoming OSC message
+     * 
+     * Called by oscpack when an OSC message arrives.
+     * Uses OscRouter to classify the message address and dispatch to handlers.
+     * 
+     * Args:
+     *   m              - The received OSC message
+     *   remoteEndpoint - Source IP/port (unused)
+     */
     void ProcessMessage(const osc::ReceivedMessage& m,
                        const IpEndpointName& /* remoteEndpoint */) override {
         try {
@@ -81,6 +118,17 @@ private:
     WingOSC* parent_;
 };
 
+/**
+ * WingOSC Constructor
+ * 
+ * Initializes OSC client parameters but does not connect.
+ * Call Start() to begin listening.
+ * 
+ * Args:
+ *   wing_ip    - IP address of Behringer Wing console
+ *   wing_port  - OSC port on Wing (default 2223)
+ *   listen_port - Local port to listen on (typically same as wing_port)
+ */
 WingOSC::WingOSC(const std::string& wing_ip, uint16_t wing_port, uint16_t listen_port)
     : wing_ip_(wing_ip)
     , wing_port_(wing_port)
@@ -91,10 +139,21 @@ WingOSC::WingOSC(const std::string& wing_ip, uint16_t wing_port, uint16_t listen
 {
 }
 
+/**
+ * WingOSC Destructor
+ * Ensures connection is closed and resources freed
+ */
 WingOSC::~WingOSC() {
     Stop();
 }
 
+/**
+ * Start() - Begin listening for OSC messages
+ * 
+ * Creates UDP socket and listener thread. If already running, returns true.
+ * 
+ * Returns: true if successful, false on error
+ */
 bool WingOSC::Start() {
     if (running_) {
         return true;
