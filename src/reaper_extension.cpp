@@ -1381,6 +1381,36 @@ void ReaperExtension::EnableMidiActions(bool enable) {
     config_.SaveToFile(WingConfig::GetConfigPath());
 }
 
+bool ReaperExtension::AreMidiShortcutsRegistered() const {
+    const char* resource_path = GetResourcePath();
+    if (!resource_path) return false;
+    
+    std::string kb_ini_path = std::string(resource_path) + "/reaper-kb.ini";
+    std::ifstream kb_file(kb_ini_path);
+    if (!kb_file.is_open()) return false;
+    
+    std::string line;
+    int found_count = 0;
+    
+    // Check for Wing MIDI shortcuts (CC 20-26 encoded as 148-154)
+    while (std::getline(kb_file, line)) {
+        // Look for our MIDI shortcuts with the +128 offset
+        if (line.find("KEY 176 148") != std::string::npos ||  // CC 20
+            line.find("KEY 176 149") != std::string::npos ||  // CC 21
+            line.find("KEY 176 150") != std::string::npos ||  // CC 22
+            line.find("KEY 176 151") != std::string::npos ||  // CC 23
+            line.find("KEY 176 152") != std::string::npos ||  // CC 24
+            line.find("KEY 176 153") != std::string::npos ||  // CC 25
+            line.find("KEY 176 154") != std::string::npos) {  // CC 26
+            found_count++;
+        }
+    }
+    kb_file.close();
+    
+    // Return true if we found all 7 shortcuts
+    return found_count >= 7;
+}
+
 bool ReaperExtension::MidiInputHook(bool is_midi, const unsigned char* data, int len, int dev_id) {
     // Get instance
     auto& ext = ReaperExtension::Instance();

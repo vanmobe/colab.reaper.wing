@@ -48,6 +48,7 @@ public:
     // MIDI action mapping
     void EnableMidiActions(bool enable);
     bool IsMidiActionsEnabled() const { return midi_actions_enabled_; }
+    bool AreMidiShortcutsRegistered() const;  // Verify shortcuts exist in reaper-kb.ini
     void EnableWingMidiDevice();
     
     // Legacy actions (keep for backward compatibility)

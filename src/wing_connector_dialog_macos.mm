@@ -359,7 +359,10 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     midiActionsCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 400, 20)];
     [midiActionsCheckbox setButtonType:NSButtonTypeSwitch];
     [midiActionsCheckbox setTitle:@"Enable MIDI Actions (Wing buttons control REAPER)"];
-    [midiActionsCheckbox setState:NSControlStateValueOn];  // Default ON
+    // Check if MIDI is truly enabled: config must be true AND shortcuts must exist
+    auto& ext = ReaperExtension::Instance();
+    BOOL midiFullyEnabled = ext.IsMidiActionsEnabled() && ext.AreMidiShortcutsRegistered();
+    [midiActionsCheckbox setState:midiFullyEnabled ? NSControlStateValueOn : NSControlStateValueOff];
     [midiActionsCheckbox setTarget:self];
     [midiActionsCheckbox setAction:@selector(onMidiActionsToggled:)];
     [contentView addSubview:midiActionsCheckbox];
@@ -539,7 +542,23 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 - (void)onMidiActionsToggled:(id)sender {
     auto& extension = ReaperExtension::Instance();
     BOOL enabled = ([midiActionsCheckbox state] == NSControlStateValueOn);
-    extension.EnableMidiActions(enabled);
+    
+    if (enabled) {
+        // When enabling, always force registration to ensure shortcuts are written
+        extension.EnableMidiActions(true);
+        
+        // Verify it actually worked
+        if (!extension.AreMidiShortcutsRegistered()) {
+            [self appendToLog:@"⚠️ Warning: MIDI shortcuts may not have been registered correctly\n"];
+            [midiActionsCheckbox setState:NSControlStateValueOff];
+        } else {
+            [self appendToLog:@"✓ MIDI actions enabled - Wing buttons now control REAPER\n"];
+        }
+    } else {
+        // When disabling, remove shortcuts
+        extension.EnableMidiActions(false);
+        [self appendToLog:@"MIDI actions disabled\n"];
+    }
 }
 
 - (void)runGetChannelsFlow {
