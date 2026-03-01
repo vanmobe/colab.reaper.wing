@@ -3,7 +3,7 @@
  * Efficient address pattern classification
  */
 
-#include "osc_routing.h"
+#include "internal/osc_routing.h"
 
 namespace WingConnector {
 

@@ -33,6 +33,9 @@ set(SOURCES
     src/reaper_extension.cpp
     src/logger.cpp
     src/osc_routing.cpp
+    src/platform_util.cpp
+    src/string_format.cpp
+    src/osc_builder.cpp
 )
 
 # Platform-specific source files
@@ -51,10 +54,10 @@ endif()
 
 # Header files
 set(HEADERS
-    include/wing_osc.h
-    include/wing_config.h
-    include/track_manager.h
-    include/reaper_extension.h
+    include/wingconnector/wing_osc.h
+    include/wingconnector/wing_config.h
+    include/wingconnector/track_manager.h
+    include/wingconnector/reaper_extension.h
 )
 
 # Create the extension library
@@ -64,6 +67,8 @@ add_library(reaper_wingconnector SHARED ${SOURCES} ${HEADERS})
 target_include_directories(reaper_wingconnector
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/wingconnector
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/reaper-sdk
         ${CMAKE_CURRENT_SOURCE_DIR}/lib
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/oscpack

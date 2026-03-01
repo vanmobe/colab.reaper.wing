@@ -3,10 +3,10 @@
  * Based on Patrick Gillot's Behringer Wing OSC Manual
  */
 
-#include "wing_osc.h"
-#include "logger.h"
-#include "osc_helpers.h"
-#include "osc_routing.h"
+#include "wingconnector/wing_osc.h"
+#include "internal/logger.h"
+#include "internal/osc_helpers.h"
+#include "internal/osc_routing.h"
 #include "reaper_plugin_functions.h"
 #include "osc/OscReceivedElements.h"
 #include "osc/OscPacketListener.h"

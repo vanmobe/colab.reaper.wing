@@ -2,17 +2,12 @@
  * Unified Logging System for Wing Connector
  */
 
-#include "logger.h"
+#include "internal/logger.h"
+#include "internal/platform_util.h"
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
-
-#ifdef _WIN32
-#define SNPRINTF _snprintf_s
-#else
-#define SNPRINTF snprintf
-#endif
 
 namespace WingConnector {
 
@@ -62,7 +57,7 @@ void Logger::LogInternal(LogLevel level, const char* fmt, va_list args) {
     
     // Format the message
     char buffer[2048];
-    SNPRINTF(buffer, sizeof(buffer), "[%s] [%s] ", timestamp, level_str);
+    Platform::StringFormat(buffer, sizeof(buffer), "[%s] [%s] ", timestamp, level_str);
     size_t prefix_len = strlen(buffer);
     
     int written = vsnprintf(buffer + prefix_len, sizeof(buffer) - prefix_len, fmt, args);

@@ -3,7 +3,8 @@
  * Load/save extension configuration
  */
 
-#include "wing_config.h"
+#include "wingconnector/wing_config.h"
+#include "internal/platform_util.h"
 #include <fstream>
 #include <cstdlib>
 #include <filesystem>
@@ -15,32 +16,7 @@ using json = nlohmann::json;
 namespace WingConnector {
 
 std::string WingConfig::GetConfigPath() {
-    const char* home = getenv("HOME");
-    if (!home) home = getenv("USERPROFILE"); // Windows
-    
-    if (home) {
-#ifdef __APPLE__
-        // macOS: Check REAPER UserPlugins directory first
-        std::string reaper_config = std::string(home) + "/Library/Application Support/REAPER/UserPlugins/config.json";
-        std::ifstream test(reaper_config);
-        if (test.good()) {
-            test.close();
-            return reaper_config;
-        }
-#elif defined(_WIN32)
-        // Windows: Check REAPER directory
-        std::string reaper_config = std::string(home) + "/AppData/Roaming/REAPER/UserPlugins/config.json";
-        std::ifstream test(reaper_config);
-        if (test.good()) {
-            test.close();
-            return reaper_config;
-        }
-#endif
-        // Fall back to user config directory
-        return std::string(home) + "/.wingconnector/config.json";
-    }
-    
-    return "config.json"; // Fallback to current directory
+    return Platform::GetConfigFilePath();
 }
 
 bool WingConfig::LoadFromFile(const std::string& filepath) {

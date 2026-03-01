@@ -10,7 +10,7 @@
 
 #include <vector>
 #include <string>
-#include "reaper_extension.h"  // For ChannelSelectionInfo
+#include "reaper_extension.h"  // For ChannelSelectionInfo (from wingconnector/)
 
 // Dialog result enum
 enum class DialogAction {

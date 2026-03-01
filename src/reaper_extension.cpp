@@ -2,10 +2,10 @@
  * Reaper Extension Main Class Implementation
  */
 
-#include "reaper_extension.h"
+#include "wingconnector/reaper_extension.h"
 #include "reaper_plugin_functions.h"
 #ifdef __APPLE__
-#include "settings_dialog_macos.h"
+#include "internal/settings_dialog_macos.h"
 #endif
 #include <chrono>
 #include <thread>

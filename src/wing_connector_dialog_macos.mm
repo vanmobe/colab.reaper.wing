@@ -6,8 +6,8 @@
 #ifdef __APPLE__
 
 #import <Cocoa/Cocoa.h>
-#include "wing_connector_dialog_macos.h"
-#include "reaper_extension.h"
+#include "internal/wing_connector_dialog_macos.h"
+#include "wingconnector/reaper_extension.h"
 #include <string>
 #include <vector>
 

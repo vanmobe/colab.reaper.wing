@@ -3,7 +3,7 @@
  * Creates and manages Reaper tracks based on Wing channel data
  */
 
-#include "track_manager.h"
+#include "wingconnector/track_manager.h"
 #include "reaper_plugin_functions.h"
 #include <algorithm>
 
@@ -28,29 +28,8 @@ int TrackManager::RGBToReaperColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 int TrackManager::WingColorToReaperColor(int wing_color_id) {
-    // Wing color palette (based on Wing console colors)
-    // These values are approximate and can be customized
-    struct ColorRGB { uint8_t r, g, b; };
-    
-    static const ColorRGB wing_colors[] = {
-        { 50, 120, 255},  // 0:  Blue
-        {100, 200, 255},  // 1:  Light Blue
-        { 20,  40, 180},  // 2:  Dark Blue
-        {  0, 160, 190},  // 3:  Sea Blue / Teal
-        { 50, 210,  50},  // 4:  Green
-        { 20, 130,  20},  // 5:  Dark Green
-        {230, 210,  20},  // 6:  Yellow
-        {240, 130,  20},  // 7:  Orange
-        {220,  40,  40},  // 8:  Red
-        {230, 110, 180},  // 9:  Pink
-        {160,  30, 230},  // 10: Purple
-        { 90,  10, 140},  // 11: Dark Purple
-    };
-    
-    const int num_colors = sizeof(wing_colors) / sizeof(ColorRGB);
-    
-    if (wing_color_id >= 0 && wing_color_id < num_colors) {
-        const auto& c = wing_colors[wing_color_id];
+    if (wing_color_id >= 0 && wing_color_id < NUM_WING_COLORS) {
+        const auto& c = WING_COLORS[wing_color_id];
         return RGBToReaperColor(c.r, c.g, c.b);
     }
     

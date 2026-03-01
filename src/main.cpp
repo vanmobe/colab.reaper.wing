@@ -5,10 +5,10 @@
 
 #define REAPERAPI_IMPLEMENT
 #include "reaper_plugin_functions.h"
-#include "reaper_extension.h"
-#include "logger.h"
+#include "wingconnector/reaper_extension.h"
+#include "internal/logger.h"
 #ifdef __APPLE__
-#include "wing_connector_dialog_macos.h"
+#include "internal/wing_connector_dialog_macos.h"
 #endif
 #include <string>
 #include <cstring>
