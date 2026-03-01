@@ -26,27 +26,34 @@ endif()
 
 # Source files
 set(SOURCES
-    src/main.cpp
-    src/wing_osc.cpp
-    src/wing_config.cpp
-    src/track_manager.cpp
-    src/reaper_extension.cpp
-    src/logger.cpp
-    src/osc_routing.cpp
-    src/platform_util.cpp
-    src/string_format.cpp
-    src/osc_builder.cpp
+    # Extension layer
+    src/extension/main.cpp
+    src/extension/reaper_extension.cpp
+    
+    # Core OSC communication
+    src/core/wing_osc.cpp
+    src/core/osc_routing.cpp
+    src/core/osc_builder.cpp
+    
+    # Utilities
+    src/utilities/wing_config.cpp
+    src/utilities/logger.cpp
+    src/utilities/platform_util.cpp
+    src/utilities/string_format.cpp
+    
+    # Track management
+    src/track/track_manager.cpp
 )
 
 # Platform-specific source files
 if(APPLE)
     list(APPEND SOURCES 
-        src/settings_dialog_macos.mm
-        src/wing_connector_dialog_macos.mm
+        src/ui/settings_dialog_macos.mm
+        src/ui/wing_connector_dialog_macos.mm
     )
     set_source_files_properties(
-        src/settings_dialog_macos.mm
-        src/wing_connector_dialog_macos.mm
+        src/ui/settings_dialog_macos.mm
+        src/ui/wing_connector_dialog_macos.mm
         PROPERTIES
         LANGUAGE OBJCXX
     )
