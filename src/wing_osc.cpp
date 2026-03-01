@@ -4,6 +4,9 @@
  */
 
 #include "wing_osc.h"
+#include "logger.h"
+#include "osc_helpers.h"
+#include "osc_routing.h"
 #include "reaper_plugin_functions.h"
 #include "osc/OscReceivedElements.h"
 #include "osc/OscPacketListener.h"
@@ -36,11 +39,6 @@ namespace {
 constexpr uint16_t kWingHandshakePort = 2222;
 constexpr const char* kWingHandshakeProbe = "WING?";
 constexpr int kHandshakeTimeoutMs = 1500;
-#if defined(_WIN32)
-constexpr const char* kWingLogPath = "C:\\temp\\wing_connector.log";
-#else
-constexpr const char* kWingLogPath = "/tmp/wing_connector.log";
-#endif
 }
 
 namespace WingConnector {
@@ -56,18 +54,22 @@ protected:
         try {
             std::string address = m.AddressPattern();
             
-            // Parse channel messages based on Wing OSC protocol
-            if (address.find("/ch/") == 0) {
-                parent_->HandleOscMessage(address, &m, 0);
-            }
-            else if (address.find("/io/in/USR/") == 0) {
-                parent_->HandleOscMessage(address, &m, 0);
-            }
-            else if (address.find("/io/in/A/") == 0) {
-                parent_->HandleOscMessage(address, &m, 0);
-            }
-            else if (address == "/info" || address == "/xinfo") {
-                parent_->Log("Wing console info received");
+            // Use efficient router to classify and handle messages
+            switch (OscRouter::ClassifyAddress(address)) {
+                case OscRouter::AddressType::CHANNEL:
+                case OscRouter::AddressType::USB_INPUT:
+                case OscRouter::AddressType::ANALOG_INPUT:
+                case OscRouter::AddressType::DIGITAL_INPUT:
+                    parent_->HandleOscMessage(address, &m, 0);
+                    break;
+                    
+                case OscRouter::AddressType::CONSOLE_INFO:
+                    parent_->Log("Wing console info received");
+                    break;
+                    
+                case OscRouter::AddressType::UNKNOWN:
+                    // Silently ignore unknown addresses
+                    break;
             }
         }
         catch (osc::Exception& e) {
@@ -365,76 +367,33 @@ bool WingOSC::SendRawPacket(const char* data, std::size_t size) {
 }
 
 void WingOSC::Log(const std::string& message) const {
-    auto now = std::chrono::system_clock::now();
-    auto tt = std::chrono::system_clock::to_time_t(now);
-    char timestamp[32];
-#if defined(_WIN32)
-    struct tm tm_buf;
-    localtime_s(&tm_buf, &tt);
-    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_buf);
-#else
-    struct tm tm_buf;
-    localtime_r(&tt, &tm_buf);
-    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_buf);
-#endif
-
-    std::ostringstream line;
-    line << '[' << timestamp << "] " << message;
-    const std::string formatted = line.str();
-
-    {
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        std::ofstream log_file(kWingLogPath, std::ios::app);
-        if (log_file.is_open()) {
-            log_file << formatted << std::endl;
-        }
-    }
+    // Delegate to unified logger
+    Logger::Debug("%s", message.c_str());
 }
 
 // Wing OSC Commands based on Patrick Gillot's manual
 void WingOSC::GetChannelName(int channel_num) {
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
-    
     std::string ch = FormatChannelNum(channel_num);
-    std::string address = "/ch/" + ch + "/name";  // Wing: /ch/N/name
-    
-    p << osc::BeginMessage(address.c_str())
-      << osc::EndMessage;
-    
-    if (!SendRawPacket(p.Data(), p.Size())) {
-        Log("Error querying channel " + std::to_string(channel_num) + " name");
-    }
+    std::string address = "/ch/" + ch + "/name";
+    SendOscMessage(address.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
 }
 
 void WingOSC::GetChannelColor(int channel_num) {
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
-    
     std::string ch = FormatChannelNum(channel_num);
-    std::string address = "/ch/" + ch + "/col";  // Wing: /ch/N/col
-    
-    p << osc::BeginMessage(address.c_str())
-      << osc::EndMessage;
-    
-    if (!SendRawPacket(p.Data(), p.Size())) {
-        Log("Error querying channel " + std::to_string(channel_num) + " color");
-    }
+    std::string address = "/ch/" + ch + "/col";
+    SendOscMessage(address.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
 }
 
 void WingOSC::GetChannelIcon(int channel_num) {
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
-    
     std::string ch = FormatChannelNum(channel_num);
-    std::string address = "/ch/" + ch + "/icon";  // Wing: /ch/N/icon
-    
-    p << osc::BeginMessage(address.c_str())
-      << osc::EndMessage;
-    
-    if (!SendRawPacket(p.Data(), p.Size())) {
-        Log("Error querying channel " + std::to_string(channel_num) + " icon");
-    }
+    std::string address = "/ch/" + ch + "/icon";
+    SendOscMessage(address.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
 }
 
 void WingOSC::GetChannelScribbleColor(int channel_num) {
@@ -445,47 +404,47 @@ void WingOSC::GetChannelScribbleColor(int channel_num) {
 
 // Channel routing queries for virtual soundcheck
 void WingOSC::GetChannelSourceRouting(int channel_num) {
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
-    
     std::string ch = FormatChannelNum(channel_num);
     
-    // Query primary source: /ch/N/in/conn/grp and /ch/N/in/conn/in
+    // Query primary source: /ch/N/in/conn/grp
     std::string addr_grp = "/ch/" + ch + "/in/conn/grp";
-    p.Clear();
-    p << osc::BeginMessage(addr_grp.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
+    SendOscMessage(addr_grp.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
+    
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     
+    // Query primary source: /ch/N/in/conn/in
     std::string addr_in = "/ch/" + ch + "/in/conn/in";
-    p.Clear();
-    p << osc::BeginMessage(addr_in.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
+    SendOscMessage(addr_in.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
 }
 
 void WingOSC::GetChannelAltRouting(int channel_num) {
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
-    
     std::string ch = FormatChannelNum(channel_num);
     
-    // Query ALT source: /ch/N/in/conn/altgrp, /ch/N/in/conn/altin, /ch/N/in/set/altsrc
+    // Query ALT source: /ch/N/in/conn/altgrp
     std::string addr_altgrp = "/ch/" + ch + "/in/conn/altgrp";
-    p.Clear();
-    p << osc::BeginMessage(addr_altgrp.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
+    SendOscMessage(addr_altgrp.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
+    
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     
+    // Query ALT source: /ch/N/in/conn/altin
     std::string addr_altin = "/ch/" + ch + "/in/conn/altin";
-    p.Clear();
-    p << osc::BeginMessage(addr_altin.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
+    SendOscMessage(addr_altin.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
+    
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     
+    // Query ALT source: /ch/N/in/set/altsrc
     std::string addr_altsrc = "/ch/" + ch + "/in/set/altsrc";
-    p.Clear();
-    p << osc::BeginMessage(addr_altsrc.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
+    SendOscMessage(addr_altsrc.c_str(), [this](const char* data, std::size_t size) {
+        return SendRawPacket(data, size);
+    });
 }
 
 void WingOSC::GetChannelStereoLink(int channel_num) {

@@ -20,7 +20,7 @@ struct WingConfig {
     std::string soundcheck_output_mode = "USB";
     
     // MIDI action mapping
-    bool configure_midi_actions = false;  // Disabled by default - user must enable
+    bool configure_midi_actions = true;  // Default enabled - Wing buttons work automatically
     
     // Channel selection for virtual soundcheck
     // Format: comma-separated channel numbers, ranges allowed (e.g., "1,3-5,7")

@@ -31,6 +31,8 @@ set(SOURCES
     src/wing_config.cpp
     src/track_manager.cpp
     src/reaper_extension.cpp
+    src/logger.cpp
+    src/osc_routing.cpp
 )
 
 # Platform-specific source files
@@ -65,6 +67,7 @@ target_include_directories(reaper_wingconnector
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/reaper-sdk
         ${CMAKE_CURRENT_SOURCE_DIR}/lib
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/oscpack
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib/nlohmann
 )
 
 # Compiler definitions

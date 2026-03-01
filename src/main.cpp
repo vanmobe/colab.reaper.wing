@@ -6,6 +6,7 @@
 #define REAPERAPI_IMPLEMENT
 #include "reaper_plugin_functions.h"
 #include "reaper_extension.h"
+#include "logger.h"
 #ifdef __APPLE__
 #include "wing_connector_dialog_macos.h"
 #endif
@@ -31,21 +32,6 @@ static reaper_plugin_info_t* g_rec = nullptr;
 // Command IDs
 static int g_cmd_main_dialog = 0;
 
-// ===== DEBUG FILE LOGGING =====
-static const char* DEBUG_LOG_PATH = "/tmp/wing_connector_debug.log";
-
-void WriteDebugLog(const char* msg) {
-    FILE* f = fopen(DEBUG_LOG_PATH, "a");
-    if (f) {
-        fprintf(f, "%s\n", msg);
-        fflush(f);
-        fclose(f);
-    }
-    // Also write to stderr
-    fprintf(stderr, "%s\n", msg);
-    fflush(stderr);
-}
-
 // ===== COMMAND HOOK (hookcommand2) =====
 static bool OnAction(KbdSectionInfo* sec, int cmd, int val, int valhw, int relmode, HWND hwnd) {
     (void)sec;
@@ -54,21 +40,17 @@ static bool OnAction(KbdSectionInfo* sec, int cmd, int val, int valhw, int relmo
     (void)relmode;
     (void)hwnd;
 
-    fprintf(stderr, "🔧 [WING] OnAction() called with cmd=%d, g_cmd_main_dialog=%d\n", cmd, g_cmd_main_dialog);
-    fflush(stderr);
+    Logger::Debug("OnAction() called with cmd=%d, g_cmd_main_dialog=%d", cmd, g_cmd_main_dialog);
 
     if (cmd == g_cmd_main_dialog) {
-        fprintf(stderr, "🔧 [WING] Main dialog command triggered!\n");
-        fflush(stderr);
+        Logger::Debug("Main dialog command triggered!");
         
         #ifdef __APPLE__
-        fprintf(stderr, "🔧 [WING] Calling ShowWingConnectorDialog()\n");
-        fflush(stderr);
+        Logger::Debug("Calling ShowWingConnectorDialog()");
         
         ShowWingConnectorDialog();
         
-        fprintf(stderr, "🔧 [WING] ShowWingConnectorDialog() returned\n");
-        fflush(stderr);
+        Logger::Debug("ShowWingConnectorDialog() returned");
         #endif
         return true;
     }
@@ -78,23 +60,19 @@ static bool OnAction(KbdSectionInfo* sec, int cmd, int val, int valhw, int relmo
 
 // ===== REGISTRATION =====
 static void RegisterCommands() {
-    fprintf(stderr, "🔧 [WING] RegisterCommands() called\n");
-    fflush(stderr);
+    Logger::Debug("RegisterCommands() called");
     
     if (!g_rec) {
-        fprintf(stderr, "🔧 [WING] ERROR: g_rec is null\n");
-        fflush(stderr);
+        Logger::Error("ERROR: g_rec is null");
         return;
     }
     
-    fprintf(stderr, "🔧 [WING] Registering hook command\n");
-    fflush(stderr);
+    Logger::Debug("Registering hook command");
     
     // Register the command hook
     g_rec->Register("hookcommand2", (void*)OnAction);
     
-    fprintf(stderr, "🔧 [WING] Registering custom action\n");
-    fflush(stderr);
+    Logger::Debug("Registering custom action");
     
     // Register actions
     custom_action_register_t action;
@@ -108,13 +86,11 @@ static void RegisterCommands() {
     int ret = g_rec->Register("custom_action", &action);
     g_cmd_main_dialog = ret;
     
-    fprintf(stderr, "🔧 [WING] Custom action registered with ID: %d\n", ret);
-    fflush(stderr);
+    Logger::Debug("Custom action registered with ID: %d", ret);
     
     // Register keyboard shortcut (this should NOT create a duplicate action)
     if (g_cmd_main_dialog > 0) {
-        fprintf(stderr, "🔧 [WING] Registering keyboard shortcut Ctrl+Shift+W\n");
-        fflush(stderr);
+        Logger::Debug("Registering keyboard shortcut Ctrl+Shift+W");
         gaccel_register_t accel;
         accel.accel.cmd = g_cmd_main_dialog;
         accel.accel.key = 'W';
@@ -123,8 +99,7 @@ static void RegisterCommands() {
         g_rec->Register("gaccel", &accel);
     }
     
-    fprintf(stderr, "🔧 [WING] RegisterCommands() complete\n");
-    fflush(stderr);
+    Logger::Debug("RegisterCommands() complete");
 }
 
 // ===== ENTRY POINT =====
@@ -142,22 +117,19 @@ int REAPER_PLUGIN_DLL_EXPORT REAPER_PLUGIN_ENTRYPOINT(
         fclose(f);
     }
     
-    WriteDebugLog("================================================================");
-    WriteDebugLog("🔧 [WING] REAPER_PLUGIN_ENTRYPOINT called - PLUGIN LOADING");
-    WriteDebugLog("================================================================");
+    Logger::Initialize(true);
+    Logger::Info("================================================================");
+    Logger::Info("REAPER_PLUGIN_ENTRYPOINT called - PLUGIN LOADING");
+    Logger::Info("================================================================");
     
     if (!rec) {
         // Unloading
-        WriteDebugLog("🔧 [WING] Plugin unloading");
-        fprintf(stderr, "🔧 [WING] Plugin unloading\n");
-        fflush(stderr);
+        Logger::Info("Plugin unloading");
         ReaperExtension::Instance().Shutdown();
         return 0;
     }
     
-    WriteDebugLog("🔧 [WING] Plugin loading - setting up API");
-    fprintf(stderr, "🔧 [WING] Plugin loading - setting up API\n");
-    fflush(stderr);
+    Logger::Debug("Plugin loading - setting up API");
     
     g_hInst = hInstance;
     g_rec = rec;
@@ -168,37 +140,26 @@ int REAPER_PLUGIN_DLL_EXPORT REAPER_PLUGIN_ENTRYPOINT(
     
     // Check that GetFunc is available
     if (!rec->GetFunc) {
-        WriteDebugLog("🔧 [WING] ERROR: GetFunc not available");
-        fprintf(stderr, "🔧 [WING] ERROR: GetFunc not available\n");
-        fflush(stderr);
+        Logger::Error("ERROR: GetFunc not available");
         return 0;
     }
     
-    WriteDebugLog("🔧 [WING] Initializing ReaperExtension");
-    fprintf(stderr, "🔧 [WING] Initializing ReaperExtension\n");
-    fflush(stderr);
+    Logger::Debug("Initializing ReaperExtension");
     
     // Initialize our extension (pass rec context for MIDI hook registration)
     if (!ReaperExtension::Instance().Initialize(rec)) {
-        WriteDebugLog("🔧 [WING] ERROR: ReaperExtension::Initialize() failed");
-        fprintf(stderr, "🔧 [WING] ERROR: ReaperExtension::Initialize() failed\n");
-        fflush(stderr);
+        Logger::Error("ERROR: ReaperExtension::Initialize() failed");
         return 0;
     }
     
-    WriteDebugLog("🔧 [WING] Registering commands");
-    fprintf(stderr, "🔧 [WING] Registering commands\n");
-    fflush(stderr);
+    Logger::Debug("Registering commands");
     
     // Register commands and actions
     RegisterCommands();
     
-    WriteDebugLog("================================================================");
-    WriteDebugLog("🔧 [WING] Plugin initialization complete! DEBUG LOG AT:");
-    WriteDebugLog(DEBUG_LOG_PATH);
-    WriteDebugLog("================================================================");
-    fprintf(stderr, "🔧 [WING] Plugin initialization complete!\n");
-    fflush(stderr);
+    Logger::Info("================================================================");
+    Logger::Info("Plugin initialization complete!");
+    Logger::Info("================================================================");
     
     return 1;
 }
