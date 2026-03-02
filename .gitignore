@@ -2,6 +2,8 @@
 build/
 install/
 cmake-build-*/
+pkg_root/
+pkg_scripts/
 
 # Compiled files
 *.o
@@ -12,6 +14,9 @@ cmake-build-*/
 *.a
 *.lib
 *.exe
+
+# Installer packages
+*.pkg
 
 # Python (backup)
 __pycache__/
