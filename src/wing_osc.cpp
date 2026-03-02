@@ -1,28 +1,6 @@
 /*
  * Wing OSC Communication Implementation
  * Based on Patrick Gillot's Behringer Wing OSC Manual
- * 
- * This module implements the Behringer Wing OSC (Open Sound Control) protocol.
- * It handles:
- * 1. UDP/OSC client connection to Wing console
- * 2. Sending OSC queries to discover channel information
- * 3. Receiving and parsing OSC responses
- * 4. Real-time subscription to Wing updates
- * 5. Channel data caching and callbacks
- * 
- * Protocol Details:
- * - Transport: UDP/OSC (default port 2223)
- * - Handshake: Sends "WING?" probe on port 2222 to locate console
- * - Channel data: Queried via /ch/[number]/[property] OSC addresses
- * - USB routing: Calculated from channel allocation info
- * - Colors: Wing palette (48 colors) mapped to REAPER RGB
- * 
- * Key responsibilities:
- * - Establish and maintain connection to Wing console
- * - Build and send OSC query messages
- * - Parse and validate OSC responses
- * - Manage channel information cache
- * - Trigger callbacks when data is received
  */
 
 #include "wingconnector/wing_osc.h"
@@ -58,34 +36,19 @@
 #endif
 
 namespace {
-constexpr uint16_t kWingHandshakePort = 2222;  // Wing discovery port
-constexpr const char* kWingHandshakeProbe = "WING?";  // Discovery message
-constexpr int kHandshakeTimeoutMs = 1500;  // Discovery timeout
+constexpr uint16_t kWingHandshakePort = 2222;
+constexpr const char* kWingHandshakeProbe = "WING?";
+constexpr int kHandshakeTimeoutMs = 1500;
 }
 
 namespace WingConnector {
 
-/**
- * WingOscListener - Internal OSC packet receiver
- * 
- * Implements osc::OscPacketListener to receive and process incoming OSC messages
- * from the Wing console. Routes messages to appropriate handlers based on address.
- */
+// OSC packet listener implementation
 class WingOscListener : public osc::OscPacketListener {
 public:
     WingOscListener(WingOSC* parent) : parent_(parent) {}
     
 protected:
-    /**
-     * ProcessMessage() - Handle incoming OSC message
-     * 
-     * Called by oscpack when an OSC message arrives.
-     * Uses OscRouter to classify the message address and dispatch to handlers.
-     * 
-     * Args:
-     *   m              - The received OSC message
-     *   remoteEndpoint - Source IP/port (unused)
-     */
     void ProcessMessage(const osc::ReceivedMessage& m,
                        const IpEndpointName& /* remoteEndpoint */) override {
         try {
@@ -118,17 +81,6 @@ private:
     WingOSC* parent_;
 };
 
-/**
- * WingOSC Constructor
- * 
- * Initializes OSC client parameters but does not connect.
- * Call Start() to begin listening.
- * 
- * Args:
- *   wing_ip    - IP address of Behringer Wing console
- *   wing_port  - OSC port on Wing (default 2223)
- *   listen_port - Local port to listen on (typically same as wing_port)
- */
 WingOSC::WingOSC(const std::string& wing_ip, uint16_t wing_port, uint16_t listen_port)
     : wing_ip_(wing_ip)
     , wing_port_(wing_port)
@@ -139,21 +91,10 @@ WingOSC::WingOSC(const std::string& wing_ip, uint16_t wing_port, uint16_t listen
 {
 }
 
-/**
- * WingOSC Destructor
- * Ensures connection is closed and resources freed
- */
 WingOSC::~WingOSC() {
     Stop();
 }
 
-/**
- * Start() - Begin listening for OSC messages
- * 
- * Creates UDP socket and listener thread. If already running, returns true.
- * 
- * Returns: true if successful, false on error
- */
 bool WingOSC::Start() {
     if (running_) {
         return true;
@@ -404,126 +345,6 @@ bool WingOSC::PerformHandshake() {
     return true;
 }
 
-std::vector<WingInfo> WingOSC::DiscoverWings(int timeout_ms) {
-    std::vector<WingInfo> results;
-
-#if defined(_WIN32)
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        return results;
-    }
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) {
-        WSACleanup();
-        return results;
-    }
-#else
-    int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        return results;
-    }
-#endif
-
-    auto closeSocket = [&]() {
-#if defined(_WIN32)
-        if (sock != INVALID_SOCKET) { closesocket(sock); sock = INVALID_SOCKET; }
-        WSACleanup();
-#else
-        if (sock >= 0) { ::close(sock); sock = -1; }
-#endif
-    };
-
-    // Enable broadcast
-    int broadcast_flag = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST,
-               reinterpret_cast<const char*>(&broadcast_flag), sizeof(broadcast_flag));
-
-    // Short per-call recvfrom timeout so we can loop collecting multiple responses
-    constexpr int kPollMs = 150;
-#if defined(_WIN32)
-    DWORD tv_val = kPollMs;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char*>(&tv_val), sizeof(tv_val));
-#else
-    timeval tv{};
-    tv.tv_sec = 0;
-    tv.tv_usec = kPollMs * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
-
-    // Broadcast "WING?" to port 2222
-    sockaddr_in dest{};
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(kWingHandshakePort);
-    inet_pton(AF_INET, "255.255.255.255", &dest.sin_addr);
-    sendto(sock, kWingHandshakeProbe, std::strlen(kWingHandshakeProbe), 0,
-           reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
-
-    // Collect responses until the total timeout expires
-    auto start = std::chrono::steady_clock::now();
-    std::set<std::string> seen_ips;
-
-    while (true) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed >= timeout_ms) {
-            break;
-        }
-
-        char buffer[512];
-        sockaddr_in from{};
-        socklen_t from_len = sizeof(from);
-#if defined(_WIN32)
-        int received = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
-                                reinterpret_cast<sockaddr*>(&from), &from_len);
-        if (received == SOCKET_ERROR) { continue; }
-#else
-        ssize_t received = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
-                                    reinterpret_cast<sockaddr*>(&from), &from_len);
-        if (received <= 0) { continue; }
-#endif
-
-        buffer[received] = '\0';
-        std::string response(buffer);
-        response.erase(std::remove(response.begin(), response.end(), '\r'), response.end());
-        response.erase(std::remove(response.begin(), response.end(), '\n'), response.end());
-
-        if (response.rfind("WING", 0) != 0) {
-            continue;
-        }
-
-        // Use actual source IP from the UDP packet (more reliable than the reported one)
-        char src_ip[INET_ADDRSTRLEN] = {};
-        inet_ntop(AF_INET, &from.sin_addr, src_ip, sizeof(src_ip));
-        std::string ip_str(src_ip);
-
-        if (seen_ips.count(ip_str)) {
-            continue;  // Duplicate response from same device
-        }
-        seen_ips.insert(ip_str);
-
-        // Parse: WING,<console_ip>,<name>,<model>,<serial>,<firmware>
-        std::vector<std::string> tokens;
-        std::istringstream ss(response);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            tokens.push_back(token);
-        }
-
-        WingInfo info;
-        info.console_ip = ip_str;
-        if (tokens.size() >= 3) info.name     = tokens[2];
-        if (tokens.size() >= 4) info.model    = tokens[3];
-        if (tokens.size() >= 5) info.serial   = tokens[4];
-        if (tokens.size() >= 6) info.firmware = tokens[5];
-
-        results.push_back(info);
-    }
-
-    closeSocket();
-    return results;
-}
-
 bool WingOSC::SendRawPacket(const char* data, std::size_t size) {
     if (!data || size == 0) {
         return false;
@@ -627,37 +448,12 @@ void WingOSC::GetChannelAltRouting(int channel_num) {
 }
 
 void WingOSC::GetChannelStereoLink(int channel_num) {
-    // Legacy: queries /ch/N/clink which only reflects channel link, not source stereo.
-    // Use QueryChannelSourceStereo for accurate source-based stereo detection.
     char buffer[256];
     osc::OutboundPacketStream p(buffer, 256);
-    std::string address = "/ch/" + FormatChannelNum(channel_num) + "/clink";
-    p << osc::BeginMessage(address.c_str()) << osc::EndMessage;
-    SendRawPacket(p.Data(), p.Size());
-}
-
-void WingOSC::QueryChannelSourceStereo(int channel_num) {
-    // Queries /io/in/{grp}/{num}/mode to get true source stereo status.
-    // Returns "M" (mono), "ST" (stereo), or "MS" (mid-side).
-    // Can be called only after source routing has been queried.
-    std::string grp;
-    int input = 0;
-    {
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        auto it = channel_data_.find(channel_num);
-        if (it == channel_data_.end()) return;
-        grp = it->second.primary_source_group;
-        input = it->second.primary_source_input;
-    }
     
-    if (grp.empty() || grp == "OFF" || input <= 0) {
-        Log("CH" + std::to_string(channel_num) + ": no source, skipping stereo mode query");
-        return;
-    }
+    std::string ch = FormatChannelNum(channel_num);
+    std::string address = "/ch/" + ch + "/clink";
     
-    std::string address = "/io/in/" + grp + "/" + std::to_string(input) + "/mode";
-    char buffer[256];
-    osc::OutboundPacketStream p(buffer, 256);
     p << osc::BeginMessage(address.c_str()) << osc::EndMessage;
     SendRawPacket(p.Data(), p.Size());
 }
@@ -1046,53 +842,92 @@ void WingOSC::SetAllChannelsAltEnabled(bool enable) {
 // USB allocation algorithm with gap backfilling
 std::vector<USBAllocation> WingOSC::CalculateUSBAllocation(const std::vector<ChannelInfo>& channels) {
     std::vector<USBAllocation> allocations;
+    std::set<int> processed_stereo_channels;  // Track stereo pairs already processed
     
     Log("Calculating USB allocation for " + std::to_string(channels.size()) + " channels...");
     
-    int next_usb = 1;
-    // Gap slots created when stereo forces alignment to an odd number.
-    // Subsequent mono channels fill these before consuming new slots.
-    std::vector<int> gap_slots;
+    int next_usb = 1;  // Start at USB 1
     
+    // Process channels IN ORDER (channel number order)
+    // This ensures mono channels get allocated first, then stereo to ODD slots with gap padding
     for (const auto& ch : channels) {
+        // Skip if this channel was already processed as part of a stereo pair
+        if (processed_stereo_channels.count(ch.channel_number)) {
+            continue;
+        }
+        
         USBAllocation alloc;
         alloc.channel_number = ch.channel_number;
         alloc.is_stereo = ch.stereo_linked;
         
         if (ch.stereo_linked) {
-            // Source-based stereo: single channel, two physical inputs (source_input and source_input+1).
-            // Must start on an odd USB slot.
+            // Resolve stereo partner from full channel data first (partner may not be selected).
+            int partner_channel = -1;
+            const auto full_data = GetChannelData();
+
+            auto it_plus = full_data.find(ch.channel_number + 1);
+            if (it_plus != full_data.end() && it_plus->second.stereo_linked) {
+                partner_channel = ch.channel_number + 1;
+            } else {
+                auto it_minus = full_data.find(ch.channel_number - 1);
+                if (it_minus != full_data.end() && it_minus->second.stereo_linked) {
+                    partner_channel = ch.channel_number - 1;
+                }
+            }
+
+            if (partner_channel == -1) {
+                for (const auto& partner : channels) {
+                    if (partner.stereo_linked && partner.channel_number != ch.channel_number) {
+                        int diff = partner.channel_number - ch.channel_number;
+                        if (diff == 1 || diff == -1) {
+                            partner_channel = partner.channel_number;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (partner_channel == -1) {
+                partner_channel = ch.channel_number + 1;
+                Log("[WARN] CH" + std::to_string(ch.channel_number) +
+                    " stereo-linked but partner not resolved; assuming CH" + std::to_string(partner_channel));
+            }
+
+            int anchor_channel = std::min(ch.channel_number, partner_channel);
+            if (ch.channel_number != anchor_channel) {
+                continue;
+            }
+            
+            // Ensure next USB is ODD for stereo pairs
             if (next_usb % 2 == 0) {
-                // Record the skipped slot — a later mono channel can use it.
-                gap_slots.push_back(next_usb);
-                Log("  USB " + std::to_string(next_usb) + " held as gap (available for later mono)");
+                // Current USB is even, skip it and mark as gap
+                Log("  USB " + std::to_string(next_usb) + " left empty (gap padding after mono)");
                 next_usb++;
             }
             
+            // Allocate stereo pair to odd USB slots
             alloc.usb_start = next_usb;
-            alloc.usb_end   = next_usb + 1;
-            alloc.allocation_note = "Stereo on USB " + std::to_string(next_usb) + "-" + std::to_string(next_usb + 1);
+            alloc.usb_end = next_usb + 1;
+            alloc.allocation_note = "Stereo pair on USB " + std::to_string(next_usb) + "-" + std::to_string(next_usb + 1);
             allocations.push_back(alloc);
             
-            Log("Channel " + std::to_string(ch.channel_number) + " (stereo source) → USB " + 
+            Log("Channel " + std::to_string(ch.channel_number) + " (stereo with CH" +
+                std::to_string(partner_channel) + ") → USB " + 
                 std::to_string(next_usb) + "-" + std::to_string(next_usb + 1));
             
-            next_usb += 2;
+            processed_stereo_channels.insert(ch.channel_number);
+            processed_stereo_channels.insert(partner_channel);
+            
+            next_usb += 2;  // Stereo consumes 2 USB slots
         } else {
-            // Mono: fill a gap slot first if one exists, otherwise take the next slot.
-            int slot;
-            if (!gap_slots.empty()) {
-                slot = gap_slots.front();
-                gap_slots.erase(gap_slots.begin());
-                Log("Channel " + std::to_string(ch.channel_number) + " (mono) → USB " + 
-                    std::to_string(slot) + " (gap fill)");
-            } else {
-                slot = next_usb++;
-                Log("Channel " + std::to_string(ch.channel_number) + " (mono) → USB " + std::to_string(slot));
-            }
-            alloc.usb_start = alloc.usb_end = slot;
-            alloc.allocation_note = "Mono on USB " + std::to_string(slot);
+            // Mono channel: allocate to next available USB
+            alloc.usb_start = alloc.usb_end = next_usb;
+            alloc.allocation_note = "Mono on USB " + std::to_string(next_usb);
             allocations.push_back(alloc);
+            
+            Log("Channel " + std::to_string(alloc.channel_number) + " (mono) → USB " + std::to_string(next_usb));
+            
+            next_usb++;
         }
     }
     
@@ -1160,39 +995,40 @@ void WingOSC::QueryUserSignalStereo(int count) {
         return;
     }
     
-    Log("========== QUERYING USR STEREO STATUS ==========");
-    Log("Testing multiple OSC paths for USR stereo status...");
+    Log("[QUERY] Requesting stereo link status for " + std::to_string(count) + " User Signal inputs...");
     
-    // Try queries to all USRs on all candidate paths
-    std::vector<std::string> test_paths = {
-        "/io/in/USR/{}/clink",
-        "/io/in/USR/{}/link", 
-        "/io/in/USR/{}/stereo",
-    };
-    
-    for (const auto& path_template : test_paths) {
-        Log("Querying path: " + path_template);
+    for (int i = 1; i <= count; ++i) {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
         
-        for (int i = 1; i <= count; ++i) {
-            std::string path = path_template;
-            size_t pos = path.find("{}");
-            if (pos != std::string::npos) {
-                path.replace(pos, 2, std::to_string(i));
+        // Query USR stereo link via its channel mapping: /ch/[N]/clink
+        // First resolve which channel this USR is routed to
+        auto [grp, ch_num] = ResolveRoutingChain("USR", i);
+        
+        if (grp != "USR") {
+            // USR is routed to a real channel (A:xx, B:xx, etc), query that channel
+            // For now assume it's A or B group - convert to channel number
+            // A:1-24, B:25-48
+            int actual_ch = ch_num;
+            if (grp == "B") {
+                actual_ch = ch_num + 24;
             }
             
-            char buffer[256];
-            osc::OutboundPacketStream p(buffer, 256);
-            p << osc::BeginMessage(path.c_str()) << osc::EndMessage;
-            SendRawPacket(p.Data(), p.Size());
+            // Format channel number with leading zero (01, 08, etc)
+            char ch_str[8];
+            snprintf(ch_str, sizeof(ch_str), "%02d", actual_ch);
+            std::string addr = "/ch/" + std::string(ch_str) + "/clink";
             
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            p << osc::BeginMessage(addr.c_str()) << osc::EndMessage;
+            SendRawPacket(p.Data(), p.Size());
+            Log("  USR:" + std::to_string(i) + " -> " + grp + ":" + std::to_string(ch_num) + " (querying " + addr + ")");
+        } else {
+            // USR routing not configured, try direct query (will likely fail)
+            Log("  USR:" + std::to_string(i) + " - no routing config, skipping");
         }
         
-        // Wait for responses
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    
-    Log("=========== QUERY COMPLETE ===========");
 }
 
 std::pair<std::string, int> WingOSC::ResolveRoutingChain(const std::string& grp, int in) {
@@ -1272,20 +1108,14 @@ std::string WingOSC::GetInputSourceName(const std::string& grp, int in) const {
 
 void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocations, 
                                        const std::vector<ChannelInfo>& channels,
-                                       const std::string& output_mode,
-                                       bool setup_soundcheck) {
+                                       const std::string& output_mode) {
     std::string output_type = (output_mode == "CARD") ? "CARD" : "USB";
     Log("\n╔═══════════════════════════════════════════════════════════╗");
-    if (setup_soundcheck) {
-        Log("║     SOUNDCHECK " + output_type + " MAPPING CONFIGURATION                 ║");
-    } else {
-        Log("║     RECORDING-ONLY " + output_type + " CONFIGURATION                     ║");
-    }
+    Log("║     SOUNDCHECK " + output_type + " MAPPING CONFIGURATION                 ║");
     Log("╚═══════════════════════════════════════════════════════════╝");
     Log("\n[SETUP] ApplyUSBAllocationAsAlt called with " + std::to_string(allocations.size()) + 
         " allocations and " + std::to_string(channels.size()) + " selected channels");
     Log("[SETUP] Output mode: " + output_type);
-    Log("[SETUP] Setup soundcheck: " + std::string(setup_soundcheck ? "YES" : "NO"));
     
     // CRITICAL: Unlock USB outputs before configuration
     Log("\n[SETUP] Step 1/4: Unlocking USB recording outputs...");
@@ -1361,25 +1191,66 @@ void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocati
             Log("         Primary source: " + ch_info.primary_source_group + 
                 ":" + std::to_string(ch_info.primary_source_input));
             
-            // Stereo on the Wing is SOURCE-based: a single channel has a stereo source.
-            // The right side is always source_input+1 in the same source group.
-            // No partner channel lookup needed.
+            // Determine stereo partner channel (supports non-standard pairs like CH8-9).
+            int partner_channel = -1;
+            auto it_plus = full_data.find(alloc.channel_number + 1);
+            if (it_plus != full_data.end() && it_plus->second.stereo_linked) {
+                partner_channel = alloc.channel_number + 1;
+            } else {
+                auto it_minus = full_data.find(alloc.channel_number - 1);
+                if (it_minus != full_data.end() && it_minus->second.stereo_linked) {
+                    partner_channel = alloc.channel_number - 1;
+                }
+            }
+
+            if (partner_channel == -1) {
+                partner_channel = alloc.channel_number + 1;
+                Log("[WARN] CH" + std::to_string(alloc.channel_number) +
+                    " stereo partner not resolved from channel data; assuming CH" + std::to_string(partner_channel));
+            }
+            
+            // For stereo channels, get the partner's info for its independent source
+            ChannelInfo ch2_info;
+            auto it_ch2 = channel_map.find(partner_channel);
+            if (it_ch2 != channel_map.end()) {
+                ch2_info = it_ch2->second;
+            } else {
+                // Try to get from full channel data (partner may not be selected but still has source data)
+                auto it_full = full_data.find(partner_channel);
+                if (it_full != full_data.end()) {
+                    ch2_info = it_full->second;
+                    Log("         (Partner CH" + std::to_string(partner_channel) + 
+                        " loaded from full channel data)");
+                } else {
+                    Log("[ERROR] Stereo partner CH" + std::to_string(partner_channel) + 
+                        " not found, cannot complete stereo pair");
+                    skipped_count++;
+                    continue;
+                }
+            }
+            
+            Log("         Stereo partner: CH" + std::to_string(partner_channel) + 
+                ": " + ch2_info.name);
+            Log("         Partner source: " + ch2_info.primary_source_group + 
+                ":" + std::to_string(ch2_info.primary_source_input));
             
             // ===== OUTPUT CONFIGURATION (Wing console sends TO REAPER) =====
             Log("\n         [CONFIGURE " + output_type + " OUTPUTS] (Wing console → REAPER via " + output_type + ")");
             
-            // Resolve left source routing chain (handles USR → A indirection)
+            // Resolve routing chains for both channels (in case they use USR inputs)
             auto [left_src_grp, left_src_in] = ResolveRoutingChain(ch_info.primary_source_group, ch_info.primary_source_input);
-            // Right source is always the next input in the same group
-            std::string right_src_grp = left_src_grp;
-            int right_src_in = left_src_in + 1;
+            auto [right_src_grp, right_src_in] = ResolveRoutingChain(ch2_info.primary_source_group, ch2_info.primary_source_input);
             
             // Log the resolved routing if it was different from original
             if (left_src_grp != ch_info.primary_source_group || left_src_in != ch_info.primary_source_input) {
                 Log("           (LEFT  resolved: " + ch_info.primary_source_group + ":" + 
                     std::to_string(ch_info.primary_source_input) + " → " + left_src_grp + ":" + 
                     std::to_string(left_src_in) + ")");
-                Log("           (RIGHT derived: " + right_src_grp + ":" + std::to_string(right_src_in) + ")");
+            }
+            if (right_src_grp != ch2_info.primary_source_group || right_src_in != ch2_info.primary_source_input) {
+                Log("           (RIGHT resolved: " + ch2_info.primary_source_group + ":" + 
+                    std::to_string(ch2_info.primary_source_input) + " → " + right_src_grp + ":" + 
+                    std::to_string(right_src_in) + ")");
             }
             
             // Configure output 1 (LEFT channel)
@@ -1409,7 +1280,7 @@ void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocati
             
             // Name outputs (what Wing console sends)
             std::string out_left_name = ch_info.name + " (L)";
-            std::string out_right_name = ch_info.name + " (R)";
+            std::string out_right_name = ch2_info.name + " (R)";
             
             Log("           " + output_type + " OUTPUT " + std::to_string(alloc.usb_start) + 
                 " name: '" + out_left_name + "'");
@@ -1429,67 +1300,67 @@ void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocati
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             
-            // ===== INPUT CONFIGURATION (REAPER playback to Wing) =====
-            // Only configure inputs if soundcheck mode is enabled
-            if (setup_soundcheck) {
-                // Name inputs (REAPER sends back to Wing console)
-                if (output_type == "USB") {
-                    Log("\n         [NAMING USB INPUTS] (For REAPER playback)");
-                    Log("           USB INPUT " + std::to_string(alloc.usb_start) + 
-                        " name: '" + out_left_name + "'");
-                    SetUSBInputName(alloc.usb_start, out_left_name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("           USB INPUT " + std::to_string(alloc.usb_end) + 
-                        " name: '" + out_right_name + "'");
-                    SetUSBInputName(alloc.usb_end, out_right_name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("\n         [SET USB INPUT MODES] (Stereo pair)");
-                    Log("           USB INPUT " + std::to_string(alloc.usb_start) + " mode: ST (stereo)");
-                    SetUSBInputMode(alloc.usb_start, "ST");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("           USB INPUT " + std::to_string(alloc.usb_end) + " mode: ST (stereo)");
-                    SetUSBInputMode(alloc.usb_end, "ST");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                } else if (output_type == "CARD") {
-                    Log("\n         [NAMING CARD INPUTS] (For REAPER playback)");
-                    Log("           CARD INPUT " + std::to_string(alloc.usb_start) + 
-                        " name: '" + out_left_name + "'");
-                    SetCardInputName(alloc.usb_start, out_left_name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("           CARD INPUT " + std::to_string(alloc.usb_end) + 
-                        " name: '" + out_right_name + "'");
-                    SetCardInputName(alloc.usb_end, out_right_name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("\n         [SET CARD INPUT MODES] (Stereo pair)");
-                    Log("           CARD INPUT " + std::to_string(alloc.usb_start) + " mode: ST (stereo)");
-                    SetCardInputMode(alloc.usb_start, "ST");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("           CARD INPUT " + std::to_string(alloc.usb_end) + " mode: ST (stereo)");
-                    SetCardInputMode(alloc.usb_end, "ST");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-                
-                // ===== ALT SOURCE CONFIGURATION (for soundcheck mode toggle) =====
-                // Stereo is source-based: only one Wing channel strip receives both sides.
-                // Set its alt source to the left USB slot; the Wing handles stereo internally.
-                Log("\n         [CONFIGURE ALT SOURCES] (For soundcheck mode toggle)");
-                
-                Log("           CH" + std::to_string(alloc.channel_number) + 
-                    " ALT: " + output_type + ":" + std::to_string(alloc.usb_start));
-                SetChannelAltSource(alloc.channel_number, output_type, alloc.usb_start);
-                configured_channels_with_alt.insert(alloc.channel_number);
+            // Name inputs (REAPER sends back to Wing console)
+            if (output_type == "USB") {
+                Log("\n         [NAMING USB INPUTS] (For REAPER playback)");
+                Log("           USB INPUT " + std::to_string(alloc.usb_start) + 
+                    " name: '" + out_left_name + "'");
+                SetUSBInputName(alloc.usb_start, out_left_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            } else {
-                Log("\n         [SKIP INPUT/ALT CONFIG] (Recording-only mode)");
+                
+                Log("           USB INPUT " + std::to_string(alloc.usb_end) + 
+                    " name: '" + out_right_name + "'");
+                SetUSBInputName(alloc.usb_end, out_right_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("\n         [SET USB INPUT MODES] (Stereo pair)");
+                Log("           USB INPUT " + std::to_string(alloc.usb_start) + " mode: ST (stereo)");
+                SetUSBInputMode(alloc.usb_start, "ST");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("           USB INPUT " + std::to_string(alloc.usb_end) + " mode: ST (stereo)");
+                SetUSBInputMode(alloc.usb_end, "ST");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } else if (output_type == "CARD") {
+                Log("\n         [NAMING CARD INPUTS] (For REAPER playback)");
+                Log("           CARD INPUT " + std::to_string(alloc.usb_start) + 
+                    " name: '" + out_left_name + "'");
+                SetCardInputName(alloc.usb_start, out_left_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("           CARD INPUT " + std::to_string(alloc.usb_end) + 
+                    " name: '" + out_right_name + "'");
+                SetCardInputName(alloc.usb_end, out_right_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("\n         [SET CARD INPUT MODES] (Stereo pair)");
+                Log("           CARD INPUT " + std::to_string(alloc.usb_start) + " mode: ST (stereo)");
+                SetCardInputMode(alloc.usb_start, "ST");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("           CARD INPUT " + std::to_string(alloc.usb_end) + " mode: ST (stereo)");
+                SetCardInputMode(alloc.usb_end, "ST");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             
+            // ===== ALT SOURCE CONFIGURATION (for soundcheck mode toggle) =====
+            Log("\n         [CONFIGURE ALT SOURCES] (For soundcheck mode toggle)");
+            
+            Log("           CH" + std::to_string(alloc.channel_number) + 
+                " ALT: " + output_type + ":" + std::to_string(alloc.usb_start));
+            SetChannelAltSource(alloc.channel_number, output_type, alloc.usb_start);
+            configured_channels_with_alt.insert(alloc.channel_number);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            
+            Log("           CH" + std::to_string(partner_channel) + 
+                " ALT: " + output_type + ":" + std::to_string(alloc.usb_end));
+            SetChannelAltSource(partner_channel, output_type, alloc.usb_end);
+            configured_channels_with_alt.insert(partner_channel);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            
+            // Mark both channels as processed to prevent re-processing when partner is encountered
             processed_stereo_channels.insert(alloc.channel_number);
+            processed_stereo_channels.insert(partner_channel);
             configured_count++;
             
         } 
@@ -1535,68 +1406,57 @@ void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocati
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             
-            // ===== INPUT CONFIGURATION (REAPER playback to Wing) =====
-            // Only configure inputs if soundcheck mode is enabled
-            if (setup_soundcheck) {
-                // Name inputs (what REAPER sends back to Wing console)
-                if (output_type == "USB") {
-                    Log("\n       [NAMING USB INPUT] (For REAPER playback)");
-                    Log("         USB INPUT " + std::to_string(alloc.usb_start) + 
-                        " name: '" + ch_info.name + "'");
-                    SetUSBInputName(alloc.usb_start, ch_info.name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("\n       [SET USB INPUT MODE] (Mono)");
-                    Log("         USB INPUT " + std::to_string(alloc.usb_start) + " mode: M (mono)");
-                    SetUSBInputMode(alloc.usb_start, "M");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                } else if (output_type == "CARD") {
-                    Log("\n       [NAMING CARD INPUT] (For REAPER playback)");
-                    Log("         CARD INPUT " + std::to_string(alloc.usb_start) + 
-                        " name: '" + ch_info.name + "'");
-                    SetCardInputName(alloc.usb_start, ch_info.name);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    
-                    Log("\n       [SET CARD INPUT MODE] (Mono)");
-                    Log("         CARD INPUT " + std::to_string(alloc.usb_start) + " mode: M (mono)");
-                    SetCardInputMode(alloc.usb_start, "M");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-                
-                // ===== ALT SOURCE CONFIGURATION (for soundcheck mode toggle) =====
-                Log("\n       [CONFIGURE ALT SOURCE] (For soundcheck mode toggle)");
-                
-                Log("         CH" + std::to_string(alloc.channel_number) + 
-                    " ALT: " + output_type + ":" + std::to_string(alloc.usb_start));
-                SetChannelAltSource(alloc.channel_number, output_type, alloc.usb_start);
-                configured_channels_with_alt.insert(alloc.channel_number);
+            // Name inputs (what REAPER sends back to Wing console)
+            if (output_type == "USB") {
+                Log("\n       [NAMING USB INPUT] (For REAPER playback)");
+                Log("         USB INPUT " + std::to_string(alloc.usb_start) + 
+                    " name: '" + ch_info.name + "'");
+                SetUSBInputName(alloc.usb_start, ch_info.name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            } else {
-                Log("\n       [SKIP INPUT/ALT CONFIG] (Recording-only mode)");
+                
+                Log("\n       [SET USB INPUT MODE] (Mono)");
+                Log("         USB INPUT " + std::to_string(alloc.usb_start) + " mode: M (mono)");
+                SetUSBInputMode(alloc.usb_start, "M");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } else if (output_type == "CARD") {
+                Log("\n       [NAMING CARD INPUT] (For REAPER playback)");
+                Log("         CARD INPUT " + std::to_string(alloc.usb_start) + 
+                    " name: '" + ch_info.name + "'");
+                SetCardInputName(alloc.usb_start, ch_info.name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                
+                Log("\n       [SET CARD INPUT MODE] (Mono)");
+                Log("         CARD INPUT " + std::to_string(alloc.usb_start) + " mode: M (mono)");
+                SetCardInputMode(alloc.usb_start, "M");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
+            
+            // ===== ALT SOURCE CONFIGURATION (for soundcheck mode toggle) =====
+            Log("\n       [CONFIGURE ALT SOURCE] (For soundcheck mode toggle)");
+            
+            Log("         CH" + std::to_string(alloc.channel_number) + 
+                " ALT: " + output_type + ":" + std::to_string(alloc.usb_start));
+            SetChannelAltSource(alloc.channel_number, output_type, alloc.usb_start);
+            configured_channels_with_alt.insert(alloc.channel_number);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         
         configured_count++;
     }
     
-    // Only clear ALT sources if we're in soundcheck mode
-    if (setup_soundcheck) {
-        Log("\n[SETUP] Step 4/5: Clearing ALT sources for unselected channels...");
-        int cleared_unselected = 0;
-        for (const auto& [channel_num, channel_info] : full_data) {
-            (void)channel_info;
-            if (configured_channels_with_alt.find(channel_num) == configured_channels_with_alt.end()) {
-                SetChannelAltSource(channel_num, "OFF", 1);
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                EnableChannelAltSource(channel_num, false);
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                cleared_unselected++;
-            }
+    Log("\n[SETUP] Step 4/5: Clearing ALT sources for unselected channels...");
+    int cleared_unselected = 0;
+    for (const auto& [channel_num, channel_info] : full_data) {
+        (void)channel_info;
+        if (configured_channels_with_alt.find(channel_num) == configured_channels_with_alt.end()) {
+            SetChannelAltSource(channel_num, "OFF", 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            EnableChannelAltSource(channel_num, false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            cleared_unselected++;
         }
-        Log("       ✓ Cleared ALT source on " + std::to_string(cleared_unselected) + " unselected channels");
-    } else {
-        Log("\n[SETUP] Step 4/5: Skipping ALT source clearing (recording-only mode)");
     }
+    Log("       ✓ Cleared ALT source on " + std::to_string(cleared_unselected) + " unselected channels");
 
     Log("\n───────────────────────────────────────────────────────────");
     Log("[SETUP] Step 5/5: Summary");
@@ -1610,11 +1470,7 @@ void WingOSC::ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocati
     }
     
     Log("\n╔═══════════════════════════════════════════════════════════╗");
-    if (setup_soundcheck) {
-        Log("║     SOUNDCHECK READY - READY FOR REAPER TRACK SETUP       ║");
-    } else {
-        Log("║     RECORDING READY - READY FOR REAPER TRACK SETUP        ║");
-    }
+    Log("║     SOUNDCHECK READY - READY FOR REAPER TRACK SETUP       ║");
     Log("╚═══════════════════════════════════════════════════════════╝\n");
 }
 
@@ -1634,8 +1490,17 @@ void WingOSC::QueryChannel(int channel_num) {
     GetChannelIcon(channel_num);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
+    // Query stereo link via /ch/N/clink
+    {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        std::string address = "/ch/" + FormatChannelNum(channel_num) + "/clink";
+        p << osc::BeginMessage(address.c_str()) << osc::EndMessage;
+        SendRawPacket(p.Data(), p.Size());
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    
     // Query routing information (for virtual soundcheck)
-    // (Stereo detection is now done via /io/in/{grp}/{num}/mode in a second pass)
     GetChannelSourceRouting(channel_num);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
     
@@ -1653,16 +1518,6 @@ void WingOSC::QueryAllChannels(int count) {
     
     for (int i = 1; i <= count; ++i) {
         QueryChannel(i);
-    }
-    
-    // Second pass: query source stereo mode via /io/in/{grp}/{num}/mode.
-    // Relies on primary_source_group/input being populated from the first pass.
-    // Wait for routing responses to arrive before querying modes.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    Log("Second pass: querying source stereo modes via /io/in/{grp}/{num}/mode...");
-    for (int i = 1; i <= count; ++i) {
-        QueryChannelSourceStereo(i);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
 
@@ -1720,8 +1575,14 @@ void WingOSC::HandleOscMessage(const std::string& address, const void* data, siz
                     channel_data_[channel_num].icon = std::to_string(arg->AsInt32());
                 }
             }
+            else if (param == "clink") {
+                // Response: ,sfi -> third arg (int) is 0=unlinked 1=linked
+                auto arg = skip(msg->ArgumentsBegin(), 2);
+                if (arg != msg->ArgumentsEnd() && arg->IsInt32()) {
+                    channel_data_[channel_num].stereo_linked = (arg->AsInt32() != 0);
+                }
+            }
             // Routing parameters (virtual soundcheck)
-            // NOTE: stereo_linked is set exclusively by /io/in/{grp}/{num}/mode responses
             else if (param == "in/conn/grp") {
                 // Primary source group: ,s -> string
                 auto arg = msg->ArgumentsBegin();
@@ -1759,9 +1620,18 @@ void WingOSC::HandleOscMessage(const std::string& address, const void* data, siz
                     parsed_from_int = arg->AsInt32();
                 }
 
-                // Use string arg for all groups - it reliably contains the correct input number.
-                // The int arg (arg2) gives wrong values for A-group inputs on this firmware.
-                int parsed_input = (parsed_from_string >= 0) ? parsed_from_string : parsed_from_int;
+                int parsed_input = -1;
+                const std::string& grp = channel_data_[channel_num].primary_source_group;
+                if (grp == "USR") {
+                    parsed_input = (parsed_from_string >= 0) ? parsed_from_string : parsed_from_int;
+                } else if (grp == "A" && parsed_from_string >= 0 && parsed_from_int >= 0 &&
+                           std::abs(parsed_from_string - parsed_from_int) == 1) {
+                    int d_str = std::abs(parsed_from_string - channel_num);
+                    int d_int = std::abs(parsed_from_int - channel_num);
+                    parsed_input = (d_str < d_int) ? parsed_from_string : parsed_from_int;
+                } else {
+                    parsed_input = (parsed_from_int >= 0) ? parsed_from_int : parsed_from_string;
+                }
 
                 if (parsed_input >= 0) {
                     channel_data_[channel_num].primary_source_input = parsed_input;
@@ -1801,8 +1671,18 @@ void WingOSC::HandleOscMessage(const std::string& address, const void* data, siz
                     parsed_from_int = arg->AsInt32();
                 }
 
-                // Use string arg for all groups - it reliably contains the correct input number.
-                int parsed_input = (parsed_from_string >= 0) ? parsed_from_string : parsed_from_int;
+                int parsed_input = -1;
+                const std::string& grp = channel_data_[channel_num].alt_source_group;
+                if (grp == "USR") {
+                    parsed_input = (parsed_from_string >= 0) ? parsed_from_string : parsed_from_int;
+                } else if (grp == "A" && parsed_from_string >= 0 && parsed_from_int >= 0 &&
+                           std::abs(parsed_from_string - parsed_from_int) == 1) {
+                    int d_str = std::abs(parsed_from_string - channel_num);
+                    int d_int = std::abs(parsed_from_int - channel_num);
+                    parsed_input = (d_str < d_int) ? parsed_from_string : parsed_from_int;
+                } else {
+                    parsed_input = (parsed_from_int >= 0) ? parsed_from_int : parsed_from_string;
+                }
 
                 if (parsed_input >= 0) {
                     channel_data_[channel_num].alt_source_input = parsed_input;
@@ -1829,49 +1709,6 @@ void WingOSC::HandleOscMessage(const std::string& address, const void* data, siz
         return;
     }
     
-    // Handle /io/in/{grp}/{num}/mode responses: source stereo status.
-    // mode = "M" (mono), "ST" (stereo), "MS" (mid-side).
-    // Maps back to channels by matching primary_source_group/input.
-    {
-        const std::string kPrefix = "/io/in/";
-        if (address.compare(0, kPrefix.size(), kPrefix) == 0) {
-            size_t grp_start = kPrefix.size();
-            size_t grp_end = address.find('/', grp_start);
-            if (grp_end != std::string::npos) {
-                size_t num_start = grp_end + 1;
-                size_t num_end = address.find('/', num_start);
-                if (num_end != std::string::npos) {
-                    std::string io_param = address.substr(num_end + 1);
-                    if (io_param == "mode") {
-                        std::string src_grp = address.substr(grp_start, grp_end - grp_start);
-                        int src_num = 0;
-                        try { src_num = std::stoi(address.substr(num_start, num_end - num_start)); }
-                        catch (...) {}
-                        if (src_num > 0) {
-                            auto* msg_local = static_cast<const osc::ReceivedMessage*>(data);
-                            auto arg = msg_local->ArgumentsBegin();
-                            if (arg != msg_local->ArgumentsEnd() && arg->IsString()) {
-                                std::string mode_str = arg->AsString();
-                                bool is_stereo = (mode_str == "ST" || mode_str == "MS");
-                                std::lock_guard<std::mutex> lock(data_mutex_);
-                                for (auto& [ch_num, ch_info] : channel_data_) {
-                                    if (ch_info.primary_source_group == src_grp &&
-                                        ch_info.primary_source_input == src_num) {
-                                        ch_info.stereo_linked = is_stereo;
-                                        if (channel_callback_) {
-                                            channel_callback_(ch_info);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
     // Try to parse as input source name message: /io/in/A/N/name
     size_t in_a_pos = address.find("/io/in/A/");
     if (in_a_pos != std::string::npos) {
@@ -1955,7 +1792,15 @@ void WingOSC::HandleOscMessage(const std::string& address, const void* data, siz
                     Log("✓ USR:" + std::to_string(usr_num) + " sources from ?:" + std::to_string(src_input));
                 }
             }
-
+            else if (param == "clink") {
+                // USR stereo link status
+                auto arg = msg->ArgumentsBegin();
+                if (arg != msg->ArgumentsEnd() && arg->IsInt32()) {
+                    bool is_stereo = (arg->AsInt32() != 0);
+                    usr_stereo_data_[usr_num] = is_stereo;
+                    Log("✓ USR:" + std::to_string(usr_num) + " stereo: " + (is_stereo ? "YES" : "NO"));
+                }
+            }
         }
         catch (osc::Exception& e) {
             Log(std::string("Error parsing USR OSC message: ") + e.what());

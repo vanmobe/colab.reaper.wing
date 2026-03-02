@@ -19,7 +19,8 @@ extern "C" {
 
 bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>& channels,
                                 const char* title,
-                                const char* description) {
+                                const char* description,
+                                bool& setup_soundcheck) {
     @autoreleasepool {
         NSAlert* alert = [[NSAlert alloc] init];
         [alert setMessageText:[NSString stringWithUTF8String:title]];
@@ -80,7 +81,22 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
         }
         
         [scrollView setDocumentView:documentView];
-        [alert setAccessoryView:scrollView];
+        
+        // Create container view for scroll view + soundcheck checkbox
+        NSView* containerView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 500, scrollHeight + 40)];
+        
+        // Position scroll view at top of container
+        [scrollView setFrameOrigin:NSMakePoint(0, 40)];
+        [containerView addSubview:scrollView];
+        
+        // Add soundcheck mode checkbox at bottom
+        NSButton* soundcheckCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(10, 10, 480, 20)];
+        [soundcheckCheckbox setButtonType:NSButtonTypeSwitch];
+        [soundcheckCheckbox setTitle:@"Configure soundcheck mode (ALT sources + inputs for REAPER playback)"];
+        [soundcheckCheckbox setState:NSControlStateValueOn];  // Default to enabled
+        [containerView addSubview:soundcheckCheckbox];
+        
+        [alert setAccessoryView:containerView];
         
         // Add buttons
         [alert addButtonWithTitle:@"OK"];
@@ -95,6 +111,8 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
                 NSButton* checkbox = [checkboxes objectAtIndex:i];
                 channels[i].selected = ([checkbox state] == NSControlStateValueOn);
             }
+            // Update soundcheck mode option
+            setup_soundcheck = ([soundcheckCheckbox state] == NSControlStateValueOn);
             return true;
         }
         
@@ -110,34 +128,40 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 @interface WingConnectorWindowController : NSWindowController <NSWindowDelegate>
 {
     // UI Elements
-    NSTextField* ipField;
-    NSTextField* portField;
+    NSPopUpButton* wingDropdown;
+    NSButton* scanButton;
+    NSMutableArray* discoveredIPs;
     NSTextField* statusLabel;
-    NSButton* connectButton;
-    NSButton* getChannelsButton;
     NSButton* setupSoundcheckButton;
     NSButton* toggleSoundcheckButton;
     NSTextView* activityLogView;
     NSScrollView* logScrollView;
     NSSegmentedControl* outputModeControl;
-    NSButton* midiActionsCheckbox;
+    NSSegmentedControl* midiActionsControl;
     
     BOOL isConnected;
+    BOOL isWorking;  // Prevents re-entrant button clicks while an operation is in progress
+    BOOL soundcheckSetupComplete;  // Tracks if live recording setup has been done
 }
 
 - (instancetype)init;
 - (void)setupUI;
 - (void)updateConnectionStatus;
+- (void)updateToggleSoundcheckButtonLabel;
 - (void)appendToLog:(NSString*)message;
+- (void)setWorkingState:(BOOL)working;
 
-- (void)onConnectClicked:(id)sender;
-- (void)onGetChannelsClicked:(id)sender;
+- (void)startDiscoveryScan;
+- (void)populateDropdownWithItems:(NSArray*)items ips:(NSArray*)ips;
+- (void)onWingDropdownChanged:(id)sender;
+- (void)onScanClicked:(id)sender;
+- (NSString*)selectedWingIP;
+
 - (void)onSetupSoundcheckClicked:(id)sender;
 - (void)onToggleSoundcheckClicked:(id)sender;
 - (void)onOutputModeChanged:(id)sender;
 - (void)onMidiActionsToggled:(id)sender;
 
-- (void)runGetChannelsFlow;
 - (void)runSetupSoundcheckFlow;
 - (void)runToggleSoundcheckModeFlow;
 
@@ -157,12 +181,16 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [window center];
     
     self = [super initWithWindow:window];
+    [window release];  // NSWindowController retains the window, release our creation reference
     if (!self) {
         return nil;
     }
     
     [window setDelegate:self];
+    discoveredIPs = [[NSMutableArray alloc] init];  // Explicitly retain
     isConnected = NO;
+    isWorking = NO;
+    soundcheckSetupComplete = NO;
     
     // MUST call setupUI FIRST to initialize activityLogView!
     [self setupUI];
@@ -184,10 +212,28 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     ReaperExtension::Instance().SetLogCallback(log_lambda);
     [self appendToLog:@"✓ C++ log callback registered successfully\n"];
     
-    [self appendToLog:@"\nWing Connector ready. Configure settings and click Connect.\n"];
+    [self appendToLog:@"\nScanning network for Wing consoles...\n"];
     [self appendToLog:@"════════════════════════════════════════════════════════════════\n"];
     
+    // Auto-scan for Wings on the network
+    [self startDiscoveryScan];
+    
     return self;
+}
+
+- (void)dealloc {
+    [discoveredIPs release];
+    // Release UI elements that we retain in instance variables
+    [wingDropdown release];
+    [scanButton release];
+    [statusLabel release];
+    [setupSoundcheckButton release];
+    [toggleSoundcheckButton release];
+    [activityLogView release];
+    [logScrollView release];
+    [outputModeControl release];
+    [midiActionsControl release];
+    [super dealloc];
 }
 
 - (void)setupUI {
@@ -243,39 +289,32 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [contentView addSubview:settingsLabel];
     yPos -= 35;
     
-    // IP Address
-    NSTextField* ipLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos, 100, 20)];
-    [ipLabel setStringValue:@"Wing IP:"];
-    [ipLabel setFont:[NSFont systemFontOfSize:12]];
-    [ipLabel setBezeled:NO];
-    [ipLabel setEditable:NO];
-    [ipLabel setSelectable:NO];
-    [ipLabel setBackgroundColor:[NSColor clearColor]];
-    [ipLabel setTextColor:[NSColor secondaryLabelColor]];
-    [contentView addSubview:ipLabel];
+    // Wing Console selector (auto-discovery dropdown)
+    NSTextField* consoleLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos, 110, 20)];
+    [consoleLabel setStringValue:@"Wing Console:"];
+    [consoleLabel setFont:[NSFont systemFontOfSize:12]];
+    [consoleLabel setBezeled:NO];
+    [consoleLabel setEditable:NO];
+    [consoleLabel setSelectable:NO];
+    [consoleLabel setBackgroundColor:[NSColor clearColor]];
+    [consoleLabel setTextColor:[NSColor secondaryLabelColor]];
+    [contentView addSubview:consoleLabel];
     
-    ipField = [[NSTextField alloc] initWithFrame:NSMakeRect(130, yPos, 180, 24)];
-    [ipField setStringValue:@"192.168.10.210"];
-    [ipField setFont:[NSFont systemFontOfSize:12]];
-    [contentView addSubview:ipField];
-    yPos -= 30;
+    wingDropdown = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(130, yPos - 3, 410, 28) pullsDown:NO];
+    [wingDropdown addItemWithTitle:@"Scanning..."];
+    [[wingDropdown itemAtIndex:0] setEnabled:NO];
+    [wingDropdown setEnabled:NO];
+    [wingDropdown setTarget:self];
+    [wingDropdown setAction:@selector(onWingDropdownChanged:)];
+    [contentView addSubview:wingDropdown];
     
-    // Listen Port
-    NSTextField* portLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos, 100, 20)];
-    [portLabel setStringValue:@"Listen Port:"];
-    [portLabel setFont:[NSFont systemFontOfSize:12]];
-    [portLabel setBezeled:NO];
-    [portLabel setEditable:NO];
-    [portLabel setSelectable:NO];
-    [portLabel setBackgroundColor:[NSColor clearColor]];
-    [portLabel setTextColor:[NSColor secondaryLabelColor]];
-    [contentView addSubview:portLabel];
-    
-    portField = [[NSTextField alloc] initWithFrame:NSMakeRect(130, yPos, 180, 24)];
-    [portField setStringValue:@"2223"];
-    [portField setFont:[NSFont systemFontOfSize:12]];
-    [contentView addSubview:portField];
-    yPos -= 40;
+    scanButton = [[NSButton alloc] initWithFrame:NSMakeRect(550, yPos - 1, 130, 28)];
+    [scanButton setTitle:@"Scan"];
+    [scanButton setBezelStyle:NSBezelStyleRounded];
+    [scanButton setTarget:self];
+    [scanButton setAction:@selector(onScanClicked:)];
+    [contentView addSubview:scanButton];
+    yPos -= 36;
     
     // Status and Connect Button in same section
     statusLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos, 300, 26)];
@@ -287,14 +326,6 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [statusLabel setBackgroundColor:[NSColor clearColor]];
     [statusLabel setTextColor:[NSColor labelColor]];
     [contentView addSubview:statusLabel];
-    
-    connectButton = [[NSButton alloc] initWithFrame:NSMakeRect(560, yPos - 2, 120, 32)];
-    [connectButton setTitle:@"Connect"];
-    [connectButton setBezelStyle:NSBezelStyleRounded];
-    [connectButton setKeyEquivalent:@"\r"];
-    [connectButton setTarget:self];
-    [connectButton setAction:@selector(onConnectClicked:)];
-    [contentView addSubview:connectButton];
     yPos -= 30;
     
     // ===== ACTIONS =====
@@ -314,29 +345,9 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [contentView addSubview:actionsHeader];
     yPos -= 35;
     
-    // Get Channels Button
-    getChannelsButton = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 200, 32)];
-    [getChannelsButton setBezelStyle:NSBezelStyleRounded];
-    [getChannelsButton setTitle:@"Get Channels"];
-    [getChannelsButton setTarget:self];
-    [getChannelsButton setAction:@selector(onGetChannelsClicked:)];
-    [getChannelsButton setEnabled:NO];
-    [contentView addSubview:getChannelsButton];
-    
-    NSTextField* getChannelsDesc = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos+8, 450, 20)];
-    [getChannelsDesc setStringValue:@"Query Wing for available channels and create REAPER tracks"];
-    [getChannelsDesc setFont:[NSFont systemFontOfSize:11]];
-    [getChannelsDesc setBezeled:NO];
-    [getChannelsDesc setEditable:NO];
-    [getChannelsDesc setSelectable:NO];
-    [getChannelsDesc setBackgroundColor:[NSColor clearColor]];
-    [getChannelsDesc setTextColor:[NSColor secondaryLabelColor]];
-    [contentView addSubview:getChannelsDesc];
-    yPos -= 42;
-    
     // Output Mode Selector (USB/CARD)
     NSTextField* outputModeLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
-    [outputModeLabel setStringValue:@"Soundcheck Output:"];
+    [outputModeLabel setStringValue:@"Send sources to:"];
     [outputModeLabel setFont:[NSFont systemFontOfSize:11]];
     [outputModeLabel setBezeled:NO];
     [outputModeLabel setEditable:NO];
@@ -355,30 +366,40 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [contentView addSubview:outputModeControl];
     yPos -= 32;
     
-    // MIDI Actions Checkbox
-    midiActionsCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 400, 20)];
-    [midiActionsCheckbox setButtonType:NSButtonTypeSwitch];
-    [midiActionsCheckbox setTitle:@"Enable MIDI Actions (Wing buttons control REAPER)"];
+    // Wing Button Actions Toggle
+    NSTextField* midiActionsLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
+    [midiActionsLabel setStringValue:@"Wing button actions:"];
+    [midiActionsLabel setFont:[NSFont systemFontOfSize:11]];
+    [midiActionsLabel setBezeled:NO];
+    [midiActionsLabel setEditable:NO];
+    [midiActionsLabel setSelectable:NO];
+    [midiActionsLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:midiActionsLabel];
+    
+    midiActionsControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(160, yPos + 4, 120, 24)];
+    [midiActionsControl setSegmentCount:2];
+    [midiActionsControl setLabel:@"OFF" forSegment:0];
+    [midiActionsControl setLabel:@"ON" forSegment:1];
     // Check if MIDI is truly enabled: config must be true AND shortcuts must exist
     auto& ext = ReaperExtension::Instance();
     BOOL midiFullyEnabled = ext.IsMidiActionsEnabled() && ext.AreMidiShortcutsRegistered();
-    [midiActionsCheckbox setState:midiFullyEnabled ? NSControlStateValueOn : NSControlStateValueOff];
-    [midiActionsCheckbox setTarget:self];
-    [midiActionsCheckbox setAction:@selector(onMidiActionsToggled:)];
-    [contentView addSubview:midiActionsCheckbox];
-    yPos -= 28;
+    [midiActionsControl setSelectedSegment:midiFullyEnabled ? 1 : 0];
+    [midiActionsControl setSegmentStyle:NSSegmentStyleRounded];
+    [midiActionsControl setTarget:self];
+    [midiActionsControl setAction:@selector(onMidiActionsToggled:)];
+    [contentView addSubview:midiActionsControl];
+    yPos -= 32;
     
-    // Setup Soundcheck Button
+    // Setup Live Recording Button
     setupSoundcheckButton = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 200, 32)];
     [setupSoundcheckButton setBezelStyle:NSBezelStyleRounded];
-    [setupSoundcheckButton setTitle:@"Setup Soundcheck"];
+    [setupSoundcheckButton setTitle:@"Setup Live Recording"];
     [setupSoundcheckButton setTarget:self];
     [setupSoundcheckButton setAction:@selector(onSetupSoundcheckClicked:)];
-    [setupSoundcheckButton setEnabled:NO];
     [contentView addSubview:setupSoundcheckButton];
     
     NSTextField* soundcheckDesc = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos+8, 450, 20)];
-    [soundcheckDesc setStringValue:@"Configure virtual soundcheck folder and routing"];
+    [soundcheckDesc setStringValue:@"Configure live recording tracks and routing"];
     [soundcheckDesc setFont:[NSFont systemFontOfSize:11]];
     [soundcheckDesc setBezeled:NO];
     [soundcheckDesc setEditable:NO];
@@ -391,14 +412,14 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     // Toggle Soundcheck Button
     toggleSoundcheckButton = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 200, 32)];
     [toggleSoundcheckButton setBezelStyle:NSBezelStyleRounded];
-    [toggleSoundcheckButton setTitle:@"Toggle Soundcheck"];
+    [toggleSoundcheckButton setTitle:@"🎙️ Live Mode"];
     [toggleSoundcheckButton setTarget:self];
     [toggleSoundcheckButton setAction:@selector(onToggleSoundcheckClicked:)];
-    [toggleSoundcheckButton setEnabled:NO];
+    [toggleSoundcheckButton setEnabled:NO];  // Disabled until setup is complete
     [contentView addSubview:toggleSoundcheckButton];
     
     NSTextField* toggleDesc = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos+8, 450, 20)];
-    [toggleDesc setStringValue:@"Switch between live and playback input modes"];
+    [toggleDesc setStringValue:@"Toggle between live and soundcheck modes (requires setup first)"];
     [toggleDesc setFont:[NSFont systemFontOfSize:11]];
     [toggleDesc setBezeled:NO];
     [toggleDesc setEditable:NO];
@@ -448,17 +469,41 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     
     if (isConnected) {
         [statusLabel setStringValue:@"🟢 Connected"];
-        [connectButton setTitle:@"Disconnect"];
-        [getChannelsButton setEnabled:YES];
-        [setupSoundcheckButton setEnabled:YES];
-        [toggleSoundcheckButton setEnabled:YES];
     } else {
         [statusLabel setStringValue:@"⚪ Not Connected"];
-        [connectButton setTitle:@"Connect"];
-        [getChannelsButton setEnabled:NO];
-        [setupSoundcheckButton setEnabled:NO];
+    }
+    // Re-enable buttons only if no operation is currently running
+    if (!isWorking) {
+        [setupSoundcheckButton setEnabled:YES];
+        [scanButton setEnabled:YES];
+        // Toggle button handled in updateToggleSoundcheckButtonLabel
+    }
+    [self updateToggleSoundcheckButtonLabel];
+}
+
+- (void)updateToggleSoundcheckButtonLabel {
+    auto& extension = ReaperExtension::Instance();
+    bool enabled = extension.IsSoundcheckModeEnabled();
+    if (enabled) {
+        [toggleSoundcheckButton setTitle:@"🎧 Soundcheck Mode"];
+    } else {
+        [toggleSoundcheckButton setTitle:@"🎙️ Live Mode"];
+    }
+    
+    // Only enable if live recording setup has been completed
+    if (soundcheckSetupComplete && !isWorking) {
+        [toggleSoundcheckButton setEnabled:YES];
+    } else {
         [toggleSoundcheckButton setEnabled:NO];
     }
+}
+
+- (void)setWorkingState:(BOOL)working {
+    isWorking = working;
+    [setupSoundcheckButton setEnabled:!working];
+    [scanButton setEnabled:!working];
+    // Toggle button state depends on both working state and setup completion
+    [self updateToggleSoundcheckButtonLabel];
 }
 
 - (void)appendToLog:(NSString*)message {
@@ -471,52 +516,118 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [activityLogView scrollRangeToVisible:range];
 }
 
-- (void)onConnectClicked:(id)sender {
-    if (isConnected) {
-        [self appendToLog:@"\n=== Disconnecting ===\n"];
-        ReaperExtension::Instance().DisconnectFromWing();
-        [self appendToLog:@"Disconnected from Wing console\n"];
-    } else {
-        [self appendToLog:@"\n=== Connecting to Wing ===\n"];
-        
-        // Update config from UI
-        auto& config = ReaperExtension::Instance().GetConfig();
-        config.wing_ip = std::string([[ipField stringValue] UTF8String]);
-        config.wing_port = 2223;
-        config.listen_port = (uint16_t)[[portField stringValue] intValue];
-        
-        [self appendToLog:[NSString stringWithFormat:@"Connecting to %s:%d...\n", 
-                          config.wing_ip.c_str(), config.wing_port]];
-        
-        ReaperExtension::Instance().ConnectToWing();
-        
-        if (ReaperExtension::Instance().IsConnected()) {
-            [self appendToLog:@"✓ Connected successfully!\n"];
-        } else {
-            [self appendToLog:@"✗ Connection failed. Check settings and try again.\n"];
-        }
-    }
+// ===== WING DISCOVERY =====
+
+- (void)startDiscoveryScan {
+    [wingDropdown removeAllItems];
+    [wingDropdown addItemWithTitle:@"Scanning..."];
+    [[wingDropdown itemAtIndex:0] setEnabled:NO];
+    [wingDropdown setEnabled:NO];
+    [scanButton setTitle:@"Scanning..."];
+    [scanButton setEnabled:NO];
     
-    [self updateConnectionStatus];
+    WingConnectorWindowController* blockSelf = self;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        auto wings = ReaperExtension::Instance().DiscoverWings(1500);
+        NSMutableArray* items = [NSMutableArray array];
+        NSMutableArray* ips   = [NSMutableArray array];
+        for (const auto& w : wings) {
+            NSString* label;
+            if (!w.name.empty() && !w.model.empty()) {
+                label = [NSString stringWithFormat:@"%s \u2013 %s  (%s)",
+                         w.name.c_str(), w.model.c_str(), w.console_ip.c_str()];
+            } else if (!w.name.empty()) {
+                label = [NSString stringWithFormat:@"%s  (%s)",
+                         w.name.c_str(), w.console_ip.c_str()];
+            } else if (!w.model.empty()) {
+                label = [NSString stringWithFormat:@"%s  (%s)",
+                         w.model.c_str(), w.console_ip.c_str()];
+            } else {
+                label = [NSString stringWithUTF8String:w.console_ip.c_str()];
+            }
+            [items addObject:label];
+            [ips   addObject:[NSString stringWithUTF8String:w.console_ip.c_str()]];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [blockSelf populateDropdownWithItems:items ips:ips];
+            // Only re-enable scan button if no other operation is running
+            if (!blockSelf->isWorking) {
+                [blockSelf->scanButton setTitle:@"Scan"];
+                [blockSelf->scanButton setEnabled:YES];
+            }
+        });
+    });
 }
 
-- (void)onGetChannelsClicked:(id)sender {
-    [self appendToLog:@"\n=== Getting Channels ===\n"];
-    [self runGetChannelsFlow];
+- (void)populateDropdownWithItems:(NSArray*)items ips:(NSArray*)ips {
+    [discoveredIPs release];
+    discoveredIPs = [[NSMutableArray arrayWithArray:ips] retain];
+    [wingDropdown removeAllItems];
+    if ([items count] == 0) {
+        [wingDropdown addItemWithTitle:@"No Wings found — press Scan"];
+        [[wingDropdown itemAtIndex:0] setEnabled:NO];
+        [wingDropdown setEnabled:NO];
+        [self appendToLog:@"\u2717 No Wing consoles found on the network. Is the Wing powered on and reachable?\n"];
+    } else {
+        [wingDropdown setEnabled:YES];
+        for (NSString* title in items) {
+            [wingDropdown addItemWithTitle:title];
+        }
+        [wingDropdown selectItemAtIndex:0];
+        // Immediately apply the first found Wing IP to config
+        auto& config = ReaperExtension::Instance().GetConfig();
+        config.wing_ip = std::string([[ips objectAtIndex:0] UTF8String]);
+        [self appendToLog:[NSString stringWithFormat:@"Found %d Wing console(s):\n", (int)[items count]]];
+        for (NSString* title in items) {
+            [self appendToLog:[NSString stringWithFormat:@"  \u2022 %@\n", title]];
+        }
+    }
+}
+
+- (void)onWingDropdownChanged:(id)sender {
+    NSInteger idx = [wingDropdown indexOfSelectedItem];
+    if (discoveredIPs && idx >= 0 && idx < (NSInteger)[discoveredIPs count]) {
+        auto& config = ReaperExtension::Instance().GetConfig();
+        config.wing_ip = std::string([[discoveredIPs objectAtIndex:idx] UTF8String]);
+        [self appendToLog:[NSString stringWithFormat:@"Selected Wing: %@\n",
+                          [wingDropdown titleOfSelectedItem]]];
+    }
+}
+
+- (void)onScanClicked:(id)sender {
+    [self appendToLog:@"\n=== Re-scanning for Wing consoles ===\n"];
+    [self startDiscoveryScan];
+}
+
+- (NSString*)selectedWingIP {
+    if (!wingDropdown || !discoveredIPs) {
+        fprintf(stderr, "[WING] ERROR: selectedWingIP called but UI not initialized (wingDropdown=%p, discoveredIPs=%p)\n", 
+                wingDropdown, discoveredIPs);
+        return nil;
+    }
+    NSInteger idx = [wingDropdown indexOfSelectedItem];
+    if (idx >= 0 && idx < (NSInteger)[discoveredIPs count]) {
+        return [discoveredIPs objectAtIndex:idx];
+    }
+    return nil;
 }
 
 - (void)onSetupSoundcheckClicked:(id)sender {
+    if (isWorking) return;  // Prevent re-entrant clicks
     // Update output mode from UI
     auto& config = ReaperExtension::Instance().GetConfig();
     config.soundcheck_output_mode = ([outputModeControl selectedSegment] == 0) ? "USB" : "CARD";
     
     [self appendToLog:[NSString stringWithFormat:@"\n=== Setting up Virtual Soundcheck (%s mode) ===\n",
                       config.soundcheck_output_mode.c_str()]];
+    [self setWorkingState:YES];
     [self runSetupSoundcheckFlow];
 }
 
 - (void)onToggleSoundcheckClicked:(id)sender {
+    if (isWorking) return;  // Prevent re-entrant clicks
     [self appendToLog:@"\n=== Toggling Soundcheck Mode ===\n"];
+    [self setWorkingState:YES];
     [self runToggleSoundcheckModeFlow];
 }
 
@@ -541,7 +652,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 
 - (void)onMidiActionsToggled:(id)sender {
     auto& extension = ReaperExtension::Instance();
-    BOOL enabled = ([midiActionsCheckbox state] == NSControlStateValueOn);
+    BOOL enabled = ([midiActionsControl selectedSegment] == 1);
     
     if (enabled) {
         // When enabling, always force registration to ensure shortcuts are written
@@ -550,7 +661,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
         // Verify it actually worked
         if (!extension.AreMidiShortcutsRegistered()) {
             [self appendToLog:@"⚠️ Warning: MIDI shortcuts may not have been registered correctly\n"];
-            [midiActionsCheckbox setState:NSControlStateValueOff];
+            [midiActionsControl setSelectedSegment:0];
         } else {
             [self appendToLog:@"✓ MIDI actions enabled - Wing buttons now control REAPER\n"];
         }
@@ -561,123 +672,177 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     }
 }
 
-- (void)runGetChannelsFlow {
-    auto& extension = ReaperExtension::Instance();
-
-    if (!extension.IsConnected()) {
-        if (!extension.ConnectToWing()) {
-            [self appendToLog:@"✗ Connection failed. Please check settings.\n"];
-            return;
-        }
-    }
-
-    [self appendToLog:@"Querying Wing console for channels...\n"];
-    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    
-    auto channels = extension.GetAvailableChannels();
-    if (channels.empty()) {
-        [self appendToLog:@"✗ No channels with sources found.\n"];
-        return;
-    }
-
-    [self appendToLog:[NSString stringWithFormat:@"Found %d channels with sources\n", (int)channels.size()]];
-    
-    bool confirmed = ShowChannelSelectionDialog(
-        channels,
-        "Select Channels to Import",
-        "Choose which channels to create as REAPER tracks."
-    );
-
-    if (!confirmed) {
-        [self appendToLog:@"Cancelled by user\n"];
-        return;
-    }
-
-    int selectedCount = 0;
-    for (const auto& channel : channels) {
-        if (channel.selected) {
-            selectedCount++;
-        }
-    }
-
-    if (selectedCount == 0) {
-        [self appendToLog:@"✗ No channels selected\n"];
-        return;
-    }
-
-    [self appendToLog:[NSString stringWithFormat:@"Creating %d tracks...\n", selectedCount]];
-    extension.CreateTracksFromSelection(channels);
-    [self appendToLog:@"✓ Tracks created successfully\n"];
-}
-
 - (void)runSetupSoundcheckFlow {
-    auto& extension = ReaperExtension::Instance();
+    // Capture UI values on the main thread before dispatching
+    NSString* wingIP = [self selectedWingIP];
+    WingConnectorWindowController* blockSelf = self;
 
-    if (!extension.IsConnected()) {
-        if (!extension.ConnectToWing()) {
-            [self appendToLog:@"✗ Connection failed. Please check settings.\n"];
+    fprintf(stderr, "[WING] runSetupSoundcheckFlow: Starting background thread. wingIP=%s\n", 
+            wingIP ? [wingIP UTF8String] : "nil");
+    fflush(stderr);
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        fprintf(stderr, "[WING] Background thread started\n"); fflush(stderr);
+        
+        auto& extension = ReaperExtension::Instance();
+        fprintf(stderr, "[WING] Got extension instance\n"); fflush(stderr);
+
+        if (!extension.IsConnected()) {
+            fprintf(stderr, "[WING] Not connected, attempting auto-connect\n"); fflush(stderr);
+            dispatch_async(dispatch_get_main_queue(), ^{ [blockSelf appendToLog:@"Not connected — attempting to connect automatically...\n"]; });
+            if (!wingIP) {
+                fprintf(stderr, "[WING] ERROR: No Wing IP selected\n"); fflush(stderr);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [blockSelf appendToLog:@"✗ No Wing selected. Press Scan to find Wing consoles on the network.\n"];
+                    [blockSelf setWorkingState:NO];
+                    [blockSelf updateConnectionStatus];
+                });
+                return;
+            }
+            auto& config = extension.GetConfig();
+            config.wing_ip = std::string([wingIP UTF8String]);
+            config.wing_port = 2223;
+            config.listen_port = 2223;
+            fprintf(stderr, "[WING] Connecting to %s:2223 (listen on %u)...\n", config.wing_ip.c_str(), config.listen_port); fflush(stderr);
+            if (!extension.ConnectToWing()) {
+                fprintf(stderr, "[WING] ERROR: ConnectToWing failed\n"); fflush(stderr);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [blockSelf appendToLog:@"✗ Auto-connect failed. Check that the Wing is reachable.\n"];
+                    [blockSelf setWorkingState:NO];
+                    [blockSelf updateConnectionStatus];
+                });
+                return;
+            }
+            fprintf(stderr, "[WING] Connected successfully\n"); fflush(stderr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [blockSelf appendToLog:@"✓ Auto-connected to Wing\n"];
+                [blockSelf updateConnectionStatus];
+            });
+        } else {
+            fprintf(stderr, "[WING] Already connected\n"); fflush(stderr);
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ [blockSelf appendToLog:@"Getting Wing channels for live recording setup...\n"]; });
+        fprintf(stderr, "[WING] Calling GetAvailableChannels...\n"); fflush(stderr);
+
+        auto channels = extension.GetAvailableChannels();
+        fprintf(stderr, "[WING] GetAvailableChannels returned %zu channels\n", channels.size()); fflush(stderr);
+        
+        if (channels.empty()) {
+            fprintf(stderr, "[WING] ERROR: No channels found\n"); fflush(stderr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [blockSelf appendToLog:@"✗ No channels with sources found.\n"];
+                [blockSelf setWorkingState:NO];
+            });
             return;
         }
-    }
 
-    [self appendToLog:@"Getting Wing channels for soundcheck setup...\n"];
-    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    
-    auto channels = extension.GetAvailableChannels();
-    if (channels.empty()) {
-        [self appendToLog:@"✗ No channels with sources found.\n"];
-        return;
-    }
+        __block auto blockChannels = channels;
+        __block bool confirmed = false;
+        __block bool setup_soundcheck = true;  // Will be set by dialog
+        fprintf(stderr, "[WING] Showing channel selection dialog on main thread...\n"); fflush(stderr);
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [blockSelf appendToLog:[NSString stringWithFormat:@"Found %d channels with sources\n", (int)blockChannels.size()]];
+            fprintf(stderr, "[WING] Calling ShowChannelSelectionDialog...\n"); fflush(stderr);
+            confirmed = ShowChannelSelectionDialog(
+                blockChannels,
+                "Select Channels for Virtual Soundcheck",
+                "Choose which channels to configure for virtual soundcheck.",
+                setup_soundcheck
+            );
+            fprintf(stderr, "[WING] Dialog returned, confirmed=%d, setup_soundcheck=%d\n", confirmed, setup_soundcheck); fflush(stderr);
+        });
 
-    [self appendToLog:[NSString stringWithFormat:@"Found %d channels with sources\n", (int)channels.size()]];
-    
-    bool confirmed = ShowChannelSelectionDialog(
-        channels,
-        "Select Channels for Virtual Soundcheck",
-        "Choose which channels to configure for virtual soundcheck."
-    );
-
-    if (!confirmed) {
-        [self appendToLog:@"Cancelled by user\n"];
-        return;
-    }
-
-    int selectedCount = 0;
-    for (const auto& channel : channels) {
-        if (channel.selected) {
-            selectedCount++;
+        if (!confirmed) {
+            fprintf(stderr, "[WING] User cancelled\n"); fflush(stderr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [blockSelf appendToLog:@"Cancelled by user\n"];
+                [blockSelf setWorkingState:NO];
+            });
+            return;
         }
-    }
 
-    if (selectedCount == 0) {
-        [self appendToLog:@"✗ No channels selected\n"];
-        return;
-    }
+        int selectedCount = 0;
+        for (const auto& ch : blockChannels) {
+            if (ch.selected) selectedCount++;
+        }
+        fprintf(stderr, "[WING] %d channels selected\n", selectedCount); fflush(stderr);
 
-    [self appendToLog:[NSString stringWithFormat:@"Setting up soundcheck for %d channels...\n", selectedCount]];
-    extension.SetupSoundcheckFromSelection(channels);
-    [self appendToLog:@"✓ Soundcheck setup complete\n"];
+        if (selectedCount == 0) {
+            fprintf(stderr, "[WING] ERROR: No channels selected\n"); fflush(stderr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [blockSelf appendToLog:@"✗ No channels selected\n"];
+                [blockSelf setWorkingState:NO];
+            });
+            return;
+        }
+
+        fprintf(stderr, "[WING] Setting up live recording on main thread...\n"); fflush(stderr);
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [blockSelf appendToLog:[NSString stringWithFormat:@"Setting up live recording for %d channels...\n", selectedCount]];
+            fprintf(stderr, "[WING] Calling SetupSoundcheckFromSelection (setup_soundcheck=%d)...\n", setup_soundcheck); fflush(stderr);
+            extension.SetupSoundcheckFromSelection(blockChannels, setup_soundcheck);
+            fprintf(stderr, "[WING] SetupSoundcheckFromSelection complete\n"); fflush(stderr);
+            [blockSelf appendToLog:@"✓ Live recording setup complete\n"];
+            blockSelf->soundcheckSetupComplete = YES;
+            [blockSelf setWorkingState:NO];
+        });
+        fprintf(stderr, "[WING] runSetupSoundcheckFlow complete\n"); fflush(stderr);
+    });
 }
 
 - (void)runToggleSoundcheckModeFlow {
-    auto& extension = ReaperExtension::Instance();
+    // Capture UI values on the main thread before dispatching
+    NSString* wingIP = [self selectedWingIP];
+    WingConnectorWindowController* blockSelf = self;
 
-    if (!extension.IsConnected()) {
-        if (!extension.ConnectToWing()) {
-            [self appendToLog:@"✗ Connection failed. Please check settings.\n"];
-            return;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        auto& extension = ReaperExtension::Instance();
+
+        if (!extension.IsConnected()) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [blockSelf appendToLog:@"Not connected — attempting to connect automatically...\n"]; });
+            if (!wingIP) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [blockSelf appendToLog:@"✗ No Wing selected. Press Scan to find Wing consoles on the network.\n"];
+                    [blockSelf setWorkingState:NO];
+                    [blockSelf updateConnectionStatus];
+                });
+                return;
+            }
+            auto& config = extension.GetConfig();
+            config.wing_ip = std::string([wingIP UTF8String]);
+            config.wing_port = 2223;
+            config.listen_port = 2223;
+            if (!extension.ConnectToWing()) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [blockSelf appendToLog:@"✗ Auto-connect failed. Check that the Wing is reachable.\n"];
+                    [blockSelf setWorkingState:NO];
+                    [blockSelf updateConnectionStatus];
+                });
+                return;
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [blockSelf appendToLog:@"✓ Auto-connected to Wing\n"];
+                [blockSelf updateConnectionStatus];
+            });
         }
-    }
 
-    [self appendToLog:@"Toggling soundcheck mode...\n"];
-    extension.ToggleSoundcheckMode();
-    bool enabled = extension.IsSoundcheckModeEnabled();
-
-    if (enabled) {
-        [self appendToLog:@"✓ Soundcheck mode ENABLED (using playback inputs)\n"];
-    } else {
-        [self appendToLog:@"✓ Soundcheck mode DISABLED (using live inputs)\n"];
-    }
+        // CRITICAL: ToggleSoundcheckMode() shows message boxes, which MUST run on main thread
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [blockSelf appendToLog:@"Toggling soundcheck mode...\n"];
+            
+            extension.ToggleSoundcheckMode();
+            bool enabled = extension.IsSoundcheckModeEnabled();
+            
+            if (enabled) {
+                [blockSelf appendToLog:@"✓ Soundcheck mode ENABLED (using playback inputs)\n"];
+            } else {
+                [blockSelf appendToLog:@"✓ Soundcheck mode DISABLED (using live inputs)\n"];
+            }
+            [blockSelf updateToggleSoundcheckButtonLabel];
+            [blockSelf setWorkingState:NO];
+        });
+    });
 }
 
 @end
@@ -689,24 +854,36 @@ void ShowWingConnectorDialog() {
     fprintf(stderr, "\n🔧 [WING] ShowWingConnectorDialog() called\n");
     fflush(stderr);
     
+    // Static to keep controller alive in MRC - window doesn't retain it by default
+    static WingConnectorWindowController* controller = nil;
+    
     // Must run UI operations on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            fprintf(stderr, "🔧 [WING] Creating WingConnectorWindowController\n");
-            fflush(stderr);
-            
-            WingConnectorWindowController* controller = [[WingConnectorWindowController alloc] init];
-            
-            fprintf(stderr, "🔧 [WING] Showing window\n");
-            fflush(stderr);
-            
+        // NO @autoreleasepool here - it would drain objects that need to live longer
+        fprintf(stderr, "🔧 [WING] Creating WingConnectorWindowController\n");
+        fflush(stderr);
+        
+        // If window already exists and is visible, just bring it to front
+        if (controller && [[controller window] isVisible]) {
             [[controller window] makeKeyAndOrderFront:nil];
-            
-            fprintf(stderr, "🔧 [WING] Appending init message\n");
-            fflush(stderr);
-            
-            [controller appendToLog:@"🔧 Window initialization complete\n"];
+            return;
         }
+        
+        // Create new controller (retained by static variable)
+        if (controller) {
+            [controller release];
+        }
+        controller = [[WingConnectorWindowController alloc] init];
+        
+        fprintf(stderr, "🔧 [WING] Showing window\n");
+        fflush(stderr);
+        
+        [[controller window] makeKeyAndOrderFront:nil];
+        
+        fprintf(stderr, "🔧 [WING] Appending init message\n");
+        fflush(stderr);
+        
+        [controller appendToLog:@"🔧 Window initialization complete\n"];
     });
 }
 

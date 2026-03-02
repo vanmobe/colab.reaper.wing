@@ -35,10 +35,12 @@ extern "C" {
 extern "C" {
     // Show channel selection dialog
     // channels: List of available channels (will be modified with selection state)
+    // setup_soundcheck: Output parameter - whether to configure soundcheck/ALT mode
     // Returns true if user confirmed, false if cancelled
     bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>& channels,
                                    const char* title,
-                                   const char* description);
+                                   const char* description,
+                                   bool& setup_soundcheck);
 }
 
 #endif // __APPLE__

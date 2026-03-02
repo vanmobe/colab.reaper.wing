@@ -38,11 +38,14 @@ public:
     // Connection (called by dialog)
     bool ConnectToWing();  // Returns true if successful
     void DisconnectFromWing();
+
+    // Network discovery: scan for Wing consoles on the LAN
+    std::vector<WingInfo> DiscoverWings(int timeout_ms = 1500);
     
     // Channel operations (called by dialog)
     std::vector<ChannelSelectionInfo> GetAvailableChannels();
     void CreateTracksFromSelection(const std::vector<ChannelSelectionInfo>& channels);
-    void SetupSoundcheckFromSelection(const std::vector<ChannelSelectionInfo>& channels);
+    void SetupSoundcheckFromSelection(const std::vector<ChannelSelectionInfo>& channels, bool setup_soundcheck = true);
     bool CheckOutputModeAvailability(const std::string& output_mode, std::string& details) const;
     
     // MIDI action mapping

@@ -102,8 +102,7 @@ public:
     // Channel routing queries (for virtual soundcheck)
     void GetChannelSourceRouting(int channel_num);     // Query primary source (grp, in)
     void GetChannelAltRouting(int channel_num);        // Query ALT source (altgrp, altin, altsrc)
-    void GetChannelStereoLink(int channel_num);        // Query stereo link status (legacy /ch/N/clink)
-    void QueryChannelSourceStereo(int channel_num);    // Query source stereo via /io/in/{grp}/{num}/mode
+    void GetChannelStereoLink(int channel_num);        // Query stereo link status
     
     // Channel routing configuration (for virtual soundcheck)
     void SetChannelAltSource(int channel_num, const std::string& grp, int in);
@@ -134,14 +133,11 @@ public:
     std::vector<USBAllocation> CalculateUSBAllocation(const std::vector<ChannelInfo>& channels);
     void ApplyUSBAllocationAsAlt(const std::vector<USBAllocation>& allocations, 
                                   const std::vector<ChannelInfo>& channels,
-                                  const std::string& output_mode = "USB",
-                                  bool setup_soundcheck = true);
+                                  const std::string& output_mode = "USB");
     
     // User Signal input routing (for resolving indirection through USR inputs)
     void QueryUserSignalInputs(int count);  // Query all USR input sources
-    void QueryUserSignalStereo(int count);  // No-op: Wing doesn't expose this via OSC
     std::pair<std::string, int> ResolveRoutingChain(const std::string& grp, int in);  // Follow routing chain
-    bool IsUserSignalStereo(int usr_num) const;  // Check if USR input is stereo (based on odd/even fallback)
     void QueryInputSourceNames(const std::set<std::pair<std::string, int>>& sources);
     std::string GetInputSourceName(const std::string& grp, int in) const;
     
@@ -155,7 +151,7 @@ public:
     // Wing metadata collected during handshake
     const WingInfo& GetWingInfo() const { return wing_info_; }
 
-    // Network discovery: broadcast "WING?" and collect all responding consoles.
+    // Network discovery: broadcast "WING?" and collect all responding consoles
     // Returns a list of WingInfo structs (one per responding device).
     // timeout_ms controls how long to wait for responses (default 1500 ms).
     static std::vector<WingInfo> DiscoverWings(int timeout_ms = 1500);
@@ -175,7 +171,6 @@ private:
     
     // User Signal input routing: maps USR input number → (source_group, source_input)
     std::map<int, std::pair<std::string, int>> usr_routing_data_;
-    std::map<int, bool> usr_stereo_data_;  // maps USR input number → is_stereo
     std::map<std::string, std::string> input_source_names_;  // key: "GROUP:IN" -> display name
     
     // Config-based USR routing fallback: maps "USR:N" → "GROUP:M"

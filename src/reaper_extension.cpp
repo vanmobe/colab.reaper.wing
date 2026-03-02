@@ -297,6 +297,9 @@ std::vector<ChannelSelectionInfo> ReaperExtension::GetAvailableChannels() {
 
     // Query USR routing so popup can display resolved sources (e.g. USR:25 -> A:8)
     osc_handler_->QueryUserSignalInputs(48);
+    
+    // Query USR stereo status so we know which sources are stereo
+    osc_handler_->QueryUserSignalStereo(48);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // Query source labels for A-inputs used by selected channels (for name fallback).
@@ -308,48 +311,200 @@ std::vector<ChannelSelectionInfo> ReaperExtension::GetAvailableChannels() {
         }
         auto resolved = osc_handler_->ResolveRoutingChain(ch.primary_source_group, ch.primary_source_input);
         source_endpoints.insert(resolved);
-        // For stereo sources, also fetch the name of the partner input (source_input + 1)
-        if (ch.stereo_linked) {
-            auto partner_resolved = osc_handler_->ResolveRoutingChain(ch.primary_source_group, ch.primary_source_input + 1);
-            source_endpoints.insert(partner_resolved);
-        }
     }
     osc_handler_->QueryInputSourceNames(source_endpoints);
     
     Log("Wing Connector: Processing channel data...\n");
-    // stereo_linked is set from /io/in/{grp}/{num}/mode by the second pass in QueryAllChannels.
-    // No heuristics needed.
     
-    // Build list of channels with sources.
-    // On Behringer Wing: stereo is SOURCE-based, not channel-based.
-    // A channel is stereo if its source is stereo. That's it - no pairing needed.
+    // First pass: identify which channels have stereo sources.
+    // Check stereo status by:
+    // 1. If channel uses USR, check IsUserSignalStereo() for that USR input
+    // 2. Otherwise, check if resolved source number is odd (1,3,5...)
+    std::set<std::pair<std::string, int>> stereo_sources;  // stores (group, input) for first of each stereo pair
     
     for (const auto& pair : channel_data) {
         const ChannelInfo& ch = pair.second;
+        if (!ch.primary_source_group.empty() && ch.primary_source_input > 0) {
+            bool is_stereo = false;
+            
+            // Check if this channel uses a USR input
+            if (ch.primary_source_group == "USR") {
+                is_stereo = osc_handler_->IsUserSignalStereo(ch.primary_source_input);
+                char src_log[256];
+                snprintf(src_log, sizeof(src_log), 
+                         "  CH%d: USR%d is %s\n",
+                         ch.channel_number, ch.primary_source_input,
+                         is_stereo ? "STEREO" : "MONO");
+                Log(src_log);
+            } else {
+                // Not USR: check if resolved source number is odd
+                auto resolved = osc_handler_->ResolveRoutingChain(ch.primary_source_group, ch.primary_source_input);
+                if (resolved.second % 2 == 1) {
+                    is_stereo = true;
+                    char src_log[256];
+                    snprintf(src_log, sizeof(src_log), 
+                             "  CH%d: %s%d resolves to stereo %s%d\n",
+                             ch.channel_number,
+                             ch.primary_source_group.c_str(), ch.primary_source_input,
+                             resolved.first.c_str(), resolved.second);
+                    Log(src_log);
+                }
+            }
+            
+            if (is_stereo) {
+                stereo_sources.insert({ch.primary_source_group, ch.primary_source_input});
+            }
+        }
+    }
+    
+    Log("Wing Connector: Identified " + std::to_string(stereo_sources.size()) + " stereo sources\n");
+    
+    // Build list of channels with sources.
+    // Stereo pairs are represented as a single row (anchor = lower channel number)
+    // and include both source endpoints for clear popup display.
+    std::set<int> processed_channels;
+
+    for (const auto& pair : channel_data) {
+        const ChannelInfo& ch = pair.second;
+
+        if (processed_channels.count(ch.channel_number)) {
+            continue;
+        }
         
+        // Log all channels to see which ones are being skipped
         if (ch.primary_source_group.empty()) {
+            Log("  CH" + std::to_string(ch.channel_number) + ": SKIP (no source), stereo_linked=" + 
+                std::to_string(ch.stereo_linked));
             continue;
         }
 
         ChannelSelectionInfo info;
+        info.partner_name.clear();
+        info.partner_source_group.clear();
+        info.partner_source_input = 0;
+
+        // Check for stereo pairing: either ch.stereo_linked OR if ch's source is part of a stereo source pair
+        bool is_stereo_pair = false;
+        int partner_num = -1;
+        
+        if (ch.stereo_linked) {
+            // Check traditional stereo linking first
+            is_stereo_pair = true;
+        } else {
+            // Check if this channel's primary source is the first of a stereo source pair
+            if (stereo_sources.count({ch.primary_source_group, ch.primary_source_input})) {
+                // This source is stereo. Find which channel has the stereo partner source
+                int partner_source_input = ch.primary_source_input + 1;
+                Log("  CH" + std::to_string(ch.channel_number) + ": Source " + ch.primary_source_group + 
+                    std::to_string(ch.primary_source_input) + " is stereo pair with " +
+                    ch.primary_source_group + std::to_string(partner_source_input) + ", searching for channel...");
+                
+                // Find which channel uses the partner source
+                for (const auto& search_pair : channel_data) {
+                    const ChannelInfo& search_ch = search_pair.second;
+                    if (search_ch.primary_source_group == ch.primary_source_group &&
+                        search_ch.primary_source_input == partner_source_input) {
+                        partner_num = search_ch.channel_number;
+                        is_stereo_pair = true;
+                        Log("    Found in CH" + std::to_string(partner_num));
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (is_stereo_pair) {
+            Log("  Checking CH" + std::to_string(ch.channel_number) + " for stereo pairing (stereo_linked=true or source-based)");
+            if (partner_num == -1) {
+                // Find partner using traditional stereo_linked logic
+                auto it_plus = channel_data.find(ch.channel_number + 1);
+                if (it_plus != channel_data.end() && it_plus->second.stereo_linked &&
+                    !it_plus->second.primary_source_group.empty()) {
+                    partner_num = ch.channel_number + 1;
+                    Log("    → Found partner CH" + std::to_string(partner_num) + " (forward)");
+                } else {
+                    auto it_minus = channel_data.find(ch.channel_number - 1);
+                    if (it_minus != channel_data.end() && it_minus->second.stereo_linked &&
+                        !it_minus->second.primary_source_group.empty()) {
+                        partner_num = ch.channel_number - 1;
+                        Log("    → Found partner CH" + std::to_string(partner_num) + " (backward)");
+                    }
+                }
+            }
+
+            if (partner_num != -1) {
+                int anchor_num = std::min(ch.channel_number, partner_num);
+                if (ch.channel_number != anchor_num) {
+                    continue;
+                }
+
+                const ChannelInfo& left = ch;
+                const ChannelInfo& right = channel_data.at(partner_num);
+
+                info.channel_number = anchor_num;
+
+                if (!left.name.empty() && !right.name.empty() && left.name != right.name) {
+                    info.name = left.name + " / " + right.name;
+                } else if (!left.name.empty()) {
+                    info.name = left.name;
+                } else if (!right.name.empty()) {
+                    info.name = right.name;
+                } else {
+                    info.name = "Stereo";
+                }
+
+                info.source_group = left.primary_source_group;
+                info.source_input = left.primary_source_input;
+                info.partner_name = right.name;
+                info.partner_source_group = right.primary_source_group;
+                info.partner_source_input = right.primary_source_input;
+
+                auto resolved_left = osc_handler_->ResolveRoutingChain(info.source_group, info.source_input);
+                info.source_group = resolved_left.first;
+                info.source_input = resolved_left.second;
+
+                auto resolved_right = osc_handler_->ResolveRoutingChain(info.partner_source_group, info.partner_source_input);
+                info.partner_source_group = resolved_right.first;
+                info.partner_source_input = resolved_right.second;
+
+                if (left.name.empty() && right.name.empty()) {
+                    std::string left_src_name = osc_handler_->GetInputSourceName(info.source_group, info.source_input);
+                    std::string right_src_name = osc_handler_->GetInputSourceName(info.partner_source_group, info.partner_source_input);
+                    if (!left_src_name.empty() && !right_src_name.empty()) {
+                        info.name = (left_src_name == right_src_name) ? left_src_name : (left_src_name + " / " + right_src_name);
+                    } else if (!left_src_name.empty()) {
+                        info.name = left_src_name;
+                    } else if (!right_src_name.empty()) {
+                        info.name = right_src_name;
+                    }
+                }
+
+                if (info.name == "Stereo") {
+                    info.name = "Stereo " + info.source_group + std::to_string(info.source_input) +
+                                "/" + info.partner_source_group + std::to_string(info.partner_source_input);
+                }
+
+                info.stereo_linked = true;
+                info.selected = (!info.name.empty() && info.name.find("Stereo ") != 0);
+
+                Log("  CH" + std::to_string(ch.channel_number) + " + CH" + std::to_string(partner_num) + 
+                    " added as STEREO PAIR (anchor=" + std::to_string(anchor_num) + ")");
+
+                result.push_back(info);
+                processed_channels.insert(ch.channel_number);
+                processed_channels.insert(partner_num);
+                continue;
+            }
+        }
+
         info.channel_number = ch.channel_number;
-        info.name = ch.name;
+        info.name = ch.name.empty() ? ("CH" + std::to_string(ch.channel_number)) : ch.name;
         info.source_group = ch.primary_source_group;
         info.source_input = ch.primary_source_input;
-        
-        // stereo if source mode was "ST" or "MS" (set by QueryChannelSourceStereo)
-        bool is_stereo = ch.stereo_linked;
-        
-        // Resolve the source to final endpoint
+
         auto resolved = osc_handler_->ResolveRoutingChain(info.source_group, info.source_input);
         info.source_group = resolved.first;
         info.source_input = resolved.second;
-
-        // For stereo sources, the partner is always source_input+1 in the same group
-        if (is_stereo) {
-            info.partner_source_group = info.source_group;
-            info.partner_source_input = info.source_input + 1;
-        }
 
         if (ch.name.empty()) {
             std::string src_name = osc_handler_->GetInputSourceName(info.source_group, info.source_input);
@@ -358,10 +513,21 @@ std::vector<ChannelSelectionInfo> ReaperExtension::GetAvailableChannels() {
             }
         }
 
-        info.stereo_linked = is_stereo;
+        info.stereo_linked = is_stereo_pair;
         info.selected = !info.name.empty() && info.name.rfind("CH", 0) != 0;
 
+        if (is_stereo_pair) {
+            if (ch.stereo_linked) {
+                Log("  CH" + std::to_string(ch.channel_number) + " added as STEREO (channel stereo_linked flag)");
+            } else {
+                Log("  CH" + std::to_string(ch.channel_number) + " added as STEREO (source-based detection)");
+            }
+        } else {
+            Log("  CH" + std::to_string(ch.channel_number) + " added as MONO");
+        }
+
         result.push_back(info);
+        processed_channels.insert(ch.channel_number);
     }
     
     char msg[128];
@@ -444,7 +610,7 @@ bool ReaperExtension::CheckOutputModeAvailability(const std::string& output_mode
 }
 
 // Setup virtual soundcheck from selected channels
-void ReaperExtension::SetupSoundcheckFromSelection(const std::vector<ChannelSelectionInfo>& channels, bool setup_soundcheck) {
+void ReaperExtension::SetupSoundcheckFromSelection(const std::vector<ChannelSelectionInfo>& channels) {
     if (!connected_ || !osc_handler_) {
         Log("Wing Connector: Not connected\n");
         return;
@@ -560,14 +726,10 @@ void ReaperExtension::SetupSoundcheckFromSelection(const std::vector<ChannelSele
     Log("\n");
     
     // Apply output allocation
-    if (setup_soundcheck) {
-        Log("Step 1/2: Configuring Wing " + output_type + " outputs and ALT sources...\n");
-    } else {
-        Log("Step 1/2: Configuring Wing " + output_type + " outputs (recording only, no soundcheck)...\n");
-    }
+    Log("Step 1/2: Configuring Wing " + output_type + " outputs and ALT sources...\n");
     // Query USR routing data before configuring (to resolve routing chains)
     osc_handler_->QueryUserSignalInputs(48);
-    osc_handler_->ApplyUSBAllocationAsAlt(allocations, selected_channels, output_mode, setup_soundcheck);
+    osc_handler_->ApplyUSBAllocationAsAlt(allocations, selected_channels, output_mode);
     
     Log("\nStep 2/2: Creating REAPER tracks...\n");
     
@@ -656,10 +818,6 @@ void ReaperExtension::DisconnectFromWing() {
     status_message_ = "Disconnected";
     
     Log("Wing Connector: Disconnected\n");
-}
-
-std::vector<WingInfo> ReaperExtension::DiscoverWings(int timeout_ms) {
-    return WingOSC::DiscoverWings(timeout_ms);
 }
 
 void ReaperExtension::RefreshTracks() {
@@ -1102,9 +1260,23 @@ void ReaperExtension::ToggleSoundcheckMode() {
     
     if (soundcheck_mode_enabled_) {
         Log("Wing Connector: Soundcheck Mode ENABLED - Channels using USB input from REAPER\n");
+        ShowMessageBox(
+            "Soundcheck Mode ENABLED\n\n"
+            "Channels are now receiving audio from REAPER via USB.\n"
+            "You can now perform a virtual soundcheck.",
+            "Wing Connector - Soundcheck Mode",
+            0
+        );
         status_message_ = "Soundcheck Mode ON";
     } else {
         Log("Wing Connector: Soundcheck Mode DISABLED - Channels using primary sources\n");
+        ShowMessageBox(
+            "Soundcheck Mode DISABLED\n\n"
+            "Channels have returned to their primary input sources.\n"
+            "Ready for live recording.",
+            "Wing Connector - Soundcheck Mode",
+            0
+        );
         status_message_ = "Soundcheck Mode OFF";
     }
 }
