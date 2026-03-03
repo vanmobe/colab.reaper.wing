@@ -4,6 +4,8 @@
 
 **Version:** 1.0.0 | **Platform:** macOS
 
+> **⚠️ Disclaimer:** This software is provided as-is for use at your own risk. No guarantees or official support are provided. Test thoroughly before using in production. See the main [README](../README.md#credits-license--warranty) for complete warranty information.
+
 ---
 
 ## Table of Contents

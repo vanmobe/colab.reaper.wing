@@ -6,6 +6,8 @@ A C++ Reaper extension that connects to a Behringer Wing console via UDP/OSC to 
 
 **📖 [Visual User Guide](docs/USER_GUIDE.md)** — Complete step-by-step guide with screenshots
 
+> **⚠️ Disclaimer:** This software is provided as-is for use at your own risk. While functional and tested, no guarantees or official support are provided. Suggestions and contributions are welcome! See [License & Warranty](#license--warranty) for details.
+
 ---
 
 ## Table of Contents
@@ -23,7 +25,7 @@ A C++ Reaper extension that connects to a Behringer Wing console via UDP/OSC to 
 11. [Documentation](#documentation)
 12. [Troubleshooting](#troubleshooting)
 13. [Development](#development)
-14. [Credits & License](#credits--license)
+14. [Credits, License & Warranty](#credits-license--warranty)
 
 ---
 
@@ -1295,7 +1297,30 @@ View extension debug/info messages:
 
 ---
 
-## Credits & License
+## Credits, License & Warranty
+
+### ⚠️ Important Disclaimer
+
+**Use at Your Own Risk**
+
+Wing Connector is provided as-is, without any guarantees or warranties of any kind. By using this software, you acknowledge and accept that:
+
+- ✅ **No Warranty:** The software is provided "as is" without warranty of any kind, express or implied
+- ✅ **No Guarantee:** There is no guarantee that it will work for your specific setup or use case
+- ✅ **No Official Support:** No official technical support or maintenance is guaranteed
+- ✅ **Use at Own Risk:** You assume all risks associated with using this software
+- ✅ **No Liability:** The authors are not liable for any damages, data loss, or issues arising from use
+
+**However:**
+
+- 💡 **Suggestions Welcome:** Feature requests and improvement suggestions are encouraged!
+- 🤝 **Contributions Appreciated:** Community contributions via pull requests are welcome
+- 📖 **Community Support:** Community-driven support through discussions and issue tracking
+- 🔧 **Open Source:** You're free to modify and adapt the code for your needs (see license)
+
+This is a community project. While efforts have been made to ensure quality and reliability, use in production environments should be thoroughly tested first.
+
+---
 
 ### Authors & Contributors
 
@@ -1324,6 +1349,8 @@ Wing Connector is released under the **MIT License**.
 - Include copyright notice
 
 See [LICENSE](LICENSE) file for complete terms.
+
+**Important:** The MIT License includes standard warranty disclaimers. Please review the LICENSE file for full legal terms, particularly the "AS IS" and warranty disclaimer provisions.
 
 ### Citation
 

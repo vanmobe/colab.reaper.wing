@@ -2,6 +2,8 @@
 
 > **Platform Support:** Wing Connector currently supports macOS only. Windows and Linux support is planned for future releases.
 
+> **⚠️ Disclaimer:** This software is provided as-is for use at your own risk. No guarantees or official support are provided. See the main [README](README.md) for full warranty information.
+
 ## macOS Installation
 
 Choose one of two installation methods:

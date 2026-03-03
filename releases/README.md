@@ -2,6 +2,8 @@
 
 This folder contains pre-built installer packages for Wing Connector.
 
+> **⚠️ Disclaimer:** This software is provided as-is for use at your own risk. No guarantees or official support are provided. Test thoroughly before production use. See [../README.md](../README.md#credits-license--warranty) for complete warranty information.
+
 ## Current Release
 
 ### Version 1.0.0
