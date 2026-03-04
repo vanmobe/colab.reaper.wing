@@ -645,7 +645,9 @@ void ReaperExtension::SetupSoundcheckFromSelection(const std::vector<ChannelSele
         if (!alloc.allocation_note.empty() && alloc.allocation_note.find("ERROR") != std::string::npos) {
             continue;
         }
-        required_io_channels = std::max(required_io_channels, alloc.usb_end);
+        if (alloc.usb_end > required_io_channels) {
+            required_io_channels = alloc.usb_end;
+        }
     }
 
     const int available_inputs = GetNumAudioInputs();
