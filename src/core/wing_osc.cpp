@@ -27,6 +27,12 @@
 
 #include <cstring>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
 #include "wingconnector/wing_osc.h"
 #include "internal/logger.h"
 #include "internal/osc_helpers.h"
@@ -48,11 +54,7 @@
 #include <fstream>
 #include <ctime>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-#else
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>

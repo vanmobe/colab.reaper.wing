@@ -5,6 +5,7 @@
 #include "internal/logger.h"
 #include "internal/platform_util.h"
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
