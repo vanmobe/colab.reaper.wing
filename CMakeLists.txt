@@ -93,8 +93,14 @@ target_include_directories(reaper_wingconnector
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/wingconnector
         ${CMAKE_CURRENT_SOURCE_DIR}/include/internal
-        ${CMAKE_CURRENT_SOURCE_DIR}/lib/reaper-sdk
         ${CMAKE_CURRENT_SOURCE_DIR}/lib
+)
+
+# Treat external dependencies as system headers to avoid breaking builds on
+# third-party warnings emitted by SDK/vendor code.
+target_include_directories(reaper_wingconnector
+    SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib/reaper-sdk
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/oscpack
         ${CMAKE_CURRENT_SOURCE_DIR}/lib/nlohmann
 )
@@ -107,9 +113,24 @@ target_compile_definitions(reaper_wingconnector
 
 # Compiler flags
 if(MSVC)
-    target_compile_options(reaper_wingconnector PRIVATE /W4 /WX-)
+    target_compile_options(
+        reaper_wingconnector
+        PRIVATE
+            /W4
+            /WX-
+            /wd4100  # unreferenced formal parameter (REAPER SDK)
+            /wd4505  # unreferenced local function removed (REAPER SDK)
+    )
 else()
-    target_compile_options(reaper_wingconnector PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(
+        reaper_wingconnector
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wno-error
+            -Wno-unused-parameter
+    )
 endif()
 
 # Link oscpack library
