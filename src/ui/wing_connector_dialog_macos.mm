@@ -384,7 +384,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     
     // Wing Button Actions Toggle
     NSTextField* midiActionsLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
-    [midiActionsLabel setStringValue:@"Wing button actions:"];
+    [midiActionsLabel setStringValue:@"Link Reaper actions to MIDI:"];
     [midiActionsLabel setFont:[NSFont systemFontOfSize:11]];
     [midiActionsLabel setBezeled:NO];
     [midiActionsLabel setEditable:NO];

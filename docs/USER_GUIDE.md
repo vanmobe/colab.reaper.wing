@@ -60,7 +60,25 @@ From the same dialog flow you can:
 
 ## 6. MIDI Button Control (Optional)
 
-To trigger REAPER actions from WING custom controls, follow:
+Built-in CC mapping used by AUDIOLAB.wing.reaper.virtualsoundcheck:
+
+| CC # | Action |
+|------|--------|
+| 20 | Set Marker |
+| 21 | Previous Marker |
+| 22 | Next Marker |
+| 23 | Record |
+| 24 | Stop |
+| 25 | Play |
+| 26 | Pause |
+
+Requirements:
+
+- Message type must be `MIDI CC` (not Note On)
+- MIDI channel must be channel 1
+- Button press value must be `> 0`
+
+For full setup steps on WING and REAPER, see:
 
 - [snapshots/README.md](../snapshots/README.md)
 

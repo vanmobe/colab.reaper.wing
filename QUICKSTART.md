@@ -42,7 +42,19 @@ Inside the AUDIOLAB.wing.reaper.virtualsoundcheck dialog:
 
 ## 5. Optional: Configure Wing Buttons
 
-Map WING custom controls to REAPER actions via MIDI:
+Default mapping used by the plugin:
+
+- `CC 20` -> Set Marker
+- `CC 21` -> Previous Marker
+- `CC 22` -> Next Marker
+- `CC 23` -> Record
+- `CC 24` -> Stop
+- `CC 25` -> Play
+- `CC 26` -> Pause
+
+Use `MIDI CC` on channel 1 from WING custom controls.
+
+Full setup steps:
 
 - [snapshots/README.md](snapshots/README.md)
 
