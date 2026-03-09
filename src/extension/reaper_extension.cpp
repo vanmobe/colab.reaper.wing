@@ -22,6 +22,13 @@
 #include <cmath>
 #ifdef _WIN32
 #include <sys/utime.h>
+// windows.h defines min/max macros that break std::min/std::max usage.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #else
 #include <utime.h>
 #endif

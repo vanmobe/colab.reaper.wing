@@ -28,10 +28,18 @@
 #include <fstream>
 
 // Keyboard modifier flag constants (Windows/REAPER standard)
+#ifndef FVIRTKEY
 #define FVIRTKEY  0x01  // Virtual key code (not ASCII)
+#endif
+#ifndef FCONTROL
 #define FCONTROL  0x08  // Ctrl modifier
+#endif
+#ifndef FSHIFT
 #define FSHIFT    0x04  // Shift modifier
+#endif
+#ifndef FALT
 #define FALT      0x10  // Alt modifier
+#endif
 #ifndef FCOMMAND
 #define FCOMMAND  0x20  // Cmd modifier on macOS (fallback when not provided by headers)
 #endif
