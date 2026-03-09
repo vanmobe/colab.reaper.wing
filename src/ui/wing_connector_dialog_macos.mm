@@ -10,6 +10,8 @@
 #include "wingconnector/reaper_extension.h"
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 using namespace WingConnector;
 
@@ -140,6 +142,20 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     NSScrollView* logScrollView;
     NSSegmentedControl* outputModeControl;
     NSSegmentedControl* midiActionsControl;
+    NSSegmentedControl* autoRecordEnableControl;
+    NSSegmentedControl* autoRecordModeControl;
+    NSTextField* thresholdField;
+    NSTextField* holdField;
+    NSPopUpButton* monitorTrackDropdown;
+    NSPopUpButton* sdSourceDropdown;
+    NSButton* sdAutoRecordCheckbox;
+    NSButton* oscOutEnableCheckbox;
+    NSTextField* oscHostField;
+    NSTextField* oscPortField;
+    NSTextField* meterPreviewLabel;
+    NSButton* ccFlashTestButton;
+    NSPopUpButton* ccLayerDropdown;
+    NSTimer* meterPreviewTimer;
     
     BOOL isConnected;
     BOOL isWorking;  // Prevents re-entrant button clicks while an operation is in progress
@@ -167,6 +183,12 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 - (void)onToggleSoundcheckClicked:(id)sender;
 - (void)onOutputModeChanged:(id)sender;
 - (void)onMidiActionsToggled:(id)sender;
+- (void)onAutoRecordSettingsChanged:(id)sender;
+- (void)refreshMonitorTrackDropdown;
+- (void)onMonitorTrackChanged:(id)sender;
+- (void)persistConfigAndLog:(NSString*)message;
+- (void)onMeterPreviewTimer:(NSTimer*)timer;
+- (void)onCcFlashTest:(id)sender;
 
 - (void)runSetupSoundcheckFlow;
 - (void)runToggleSoundcheckModeFlow;
@@ -177,13 +199,15 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 
 - (instancetype)init {
     // Create the window with modern styling
-    NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 780)
+    NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 980)
                                                      styleMask:(NSWindowStyleMaskTitled |
                                                                NSWindowStyleMaskClosable |
-                                                               NSWindowStyleMaskMiniaturizable)
+                                                               NSWindowStyleMaskMiniaturizable |
+                                                               NSWindowStyleMaskResizable)
                                                        backing:NSBackingStoreBuffered
                                                          defer:NO];
-    [window setTitle:@"AUDIOLAB.wing.reaper.virtualsoundcheck"];
+    [window setTitle:@"Behringer Wing"];
+    [window setMinSize:NSMakeSize(700, 780)];
     [window center];
     
     self = [super initWithWindow:window];
@@ -198,6 +222,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     isWorking = NO;
     liveSetupValidated = NO;
     validationInProgress = NO;
+    meterPreviewTimer = nil;
     
     // MUST call setupUI FIRST to initialize activityLogView!
     [self setupUI];
@@ -224,6 +249,11 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     
     // Auto-scan for Wings on the network
     [self startDiscoveryScan];
+    meterPreviewTimer = [[NSTimer scheduledTimerWithTimeInterval:0.5
+                                                          target:self
+                                                        selector:@selector(onMeterPreviewTimer:)
+                                                        userInfo:nil
+                                                         repeats:YES] retain];
     
     return self;
 }
@@ -242,12 +272,27 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [logScrollView release];
     [outputModeControl release];
     [midiActionsControl release];
+    [autoRecordEnableControl release];
+    [autoRecordModeControl release];
+    [thresholdField release];
+    [holdField release];
+    [monitorTrackDropdown release];
+    [sdSourceDropdown release];
+    [sdAutoRecordCheckbox release];
+    [oscOutEnableCheckbox release];
+    [oscHostField release];
+    [oscPortField release];
+    [meterPreviewLabel release];
+    [ccFlashTestButton release];
+    [ccLayerDropdown release];
+    [meterPreviewTimer invalidate];
+    [meterPreviewTimer release];
     [super dealloc];
 }
 
 - (void)setupUI {
     NSView* contentView = [[self window] contentView];
-    int yPos = 700;
+    int yPos = (int)NSHeight([contentView bounds]) - 80;
     
     // ===== HEADER WITH LOGO =====
     NSBox* headerBox = [[NSBox alloc] initWithFrame:NSMakeRect(0, yPos - 10, 700, 70)];
@@ -264,7 +309,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     
     // Title
     NSTextField* titleLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(70, yPos + 20, 400, 24)];
-    [titleLabel setStringValue:@"Behringer AUDIOLAB.wing.reaper.virtualsoundcheck"];
+    [titleLabel setStringValue:@"Behringer Wing"];
     [titleLabel setFont:[NSFont systemFontOfSize:18 weight:NSFontWeightMedium]];
     [titleLabel setBezeled:NO];
     [titleLabel setEditable:NO];
@@ -275,7 +320,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     
     // Subtitle
     NSTextField* subtitleLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(70, yPos, 400, 18)];
-    [subtitleLabel setStringValue:@"Connect and manage Wing console integration"];
+    [subtitleLabel setStringValue:@"Configure virtual soundcheck / recording"];
     [subtitleLabel setFont:[NSFont systemFontOfSize:12]];
     [subtitleLabel setBezeled:NO];
     [subtitleLabel setEditable:NO];
@@ -405,16 +450,16 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [midiActionsControl setAction:@selector(onMidiActionsToggled:)];
     [contentView addSubview:midiActionsControl];
     yPos -= 32;
-    
-    // Setup Live Recording Button
+
+    // Setup Live Recording Button (Actions section)
     setupSoundcheckButton = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 200, 32)];
     [setupSoundcheckButton setBezelStyle:NSBezelStyleRounded];
     [setupSoundcheckButton setTitle:@"Setup Live Recording"];
     [setupSoundcheckButton setTarget:self];
     [setupSoundcheckButton setAction:@selector(onSetupSoundcheckClicked:)];
     [contentView addSubview:setupSoundcheckButton];
-    
-    setupSoundcheckDescriptionLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos+8, 450, 20)];
+
+    setupSoundcheckDescriptionLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos + 8, 450, 20)];
     [setupSoundcheckDescriptionLabel setStringValue:@"Configure live recording tracks and routing"];
     [setupSoundcheckDescriptionLabel setFont:[NSFont systemFontOfSize:11]];
     [setupSoundcheckDescriptionLabel setBezeled:NO];
@@ -424,8 +469,8 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [setupSoundcheckDescriptionLabel setTextColor:[NSColor secondaryLabelColor]];
     [contentView addSubview:setupSoundcheckDescriptionLabel];
     yPos -= 42;
-    
-    // Toggle Soundcheck Button
+
+    // Toggle Soundcheck Button (Actions section)
     toggleSoundcheckButton = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos, 200, 32)];
     [toggleSoundcheckButton setBezelStyle:NSBezelStyleRounded];
     [toggleSoundcheckButton setTitle:@"🎙️ Live Mode"];
@@ -433,8 +478,8 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [toggleSoundcheckButton setAction:@selector(onToggleSoundcheckClicked:)];
     [toggleSoundcheckButton setEnabled:NO];  // Disabled until setup is complete
     [contentView addSubview:toggleSoundcheckButton];
-    
-    NSTextField* toggleDesc = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos+8, 450, 20)];
+
+    NSTextField* toggleDesc = [[NSTextField alloc] initWithFrame:NSMakeRect(230, yPos + 8, 450, 20)];
     [toggleDesc setStringValue:@"Toggle between live and soundcheck modes (requires setup first)"];
     [toggleDesc setFont:[NSFont systemFontOfSize:11]];
     [toggleDesc setBezeled:NO];
@@ -443,7 +488,175 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [toggleDesc setBackgroundColor:[NSColor clearColor]];
     [toggleDesc setTextColor:[NSColor secondaryLabelColor]];
     [contentView addSubview:toggleDesc];
-    yPos -= 50;
+    yPos -= 44;
+
+    auto& cfg = ReaperExtension::Instance().GetConfig();
+
+    NSTextField* autoTriggerHeader = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos, 240, 20)];
+    [autoTriggerHeader setStringValue:@"Auto Trigger"];
+    [autoTriggerHeader setFont:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold]];
+    [autoTriggerHeader setBezeled:NO];
+    [autoTriggerHeader setEditable:NO];
+    [autoTriggerHeader setSelectable:NO];
+    [autoTriggerHeader setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:autoTriggerHeader];
+    yPos -= 30;
+
+    NSTextField* autoEnableLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
+    [autoEnableLabel setStringValue:@"Enable trigger:"];
+    [autoEnableLabel setFont:[NSFont systemFontOfSize:11]];
+    [autoEnableLabel setBezeled:NO];
+    [autoEnableLabel setEditable:NO];
+    [autoEnableLabel setSelectable:NO];
+    [autoEnableLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:autoEnableLabel];
+
+    autoRecordEnableControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(160, yPos + 4, 120, 24)];
+    [autoRecordEnableControl setSegmentCount:2];
+    [autoRecordEnableControl setLabel:@"OFF" forSegment:0];
+    [autoRecordEnableControl setLabel:@"ON" forSegment:1];
+    [autoRecordEnableControl setSelectedSegment:cfg.auto_record_enabled ? 1 : 0];
+    [autoRecordEnableControl setTarget:self];
+    [autoRecordEnableControl setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:autoRecordEnableControl];
+    yPos -= 32;
+
+    NSTextField* modeLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
+    [modeLabel setStringValue:@"Mode:"];
+    [modeLabel setFont:[NSFont systemFontOfSize:11]];
+    [modeLabel setBezeled:NO];
+    [modeLabel setEditable:NO];
+    [modeLabel setSelectable:NO];
+    [modeLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:modeLabel];
+
+    autoRecordModeControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(160, yPos + 4, 220, 24)];
+    [autoRecordModeControl setSegmentCount:2];
+    [autoRecordModeControl setLabel:@"WARNING" forSegment:0];
+    [autoRecordModeControl setLabel:@"RECORD" forSegment:1];
+    [autoRecordModeControl setSelectedSegment:cfg.auto_record_warning_only ? 0 : 1];
+    [autoRecordModeControl setTarget:self];
+    [autoRecordModeControl setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:autoRecordModeControl];
+    yPos -= 32;
+
+    NSTextField* thresholdLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
+    [thresholdLabel setStringValue:@"Threshold dBFS:"];
+    [thresholdLabel setFont:[NSFont systemFontOfSize:11]];
+    [thresholdLabel setBezeled:NO];
+    [thresholdLabel setEditable:NO];
+    [thresholdLabel setSelectable:NO];
+    [thresholdLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:thresholdLabel];
+    thresholdField = [[NSTextField alloc] initWithFrame:NSMakeRect(160, yPos + 4, 80, 24)];
+    [thresholdField setStringValue:[NSString stringWithFormat:@"%.1f", cfg.auto_record_threshold_db]];
+    [thresholdField setTarget:self];
+    [thresholdField setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:thresholdField];
+
+    NSTextField* holdLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(255, yPos + 8, 70, 20)];
+    [holdLabel setStringValue:@"Hold ms:"];
+    [holdLabel setFont:[NSFont systemFontOfSize:11]];
+    [holdLabel setBezeled:NO];
+    [holdLabel setEditable:NO];
+    [holdLabel setSelectable:NO];
+    [holdLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:holdLabel];
+    holdField = [[NSTextField alloc] initWithFrame:NSMakeRect(320, yPos + 4, 70, 24)];
+    [holdField setStringValue:[NSString stringWithFormat:@"%d", cfg.auto_record_hold_ms]];
+    [holdField setTarget:self];
+    [holdField setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:holdField];
+
+    NSTextField* trackLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(405, yPos + 8, 120, 20)];
+    [trackLabel setStringValue:@"Monitor track:"];
+    [trackLabel setFont:[NSFont systemFontOfSize:11]];
+    [trackLabel setBezeled:NO];
+    [trackLabel setEditable:NO];
+    [trackLabel setSelectable:NO];
+    [trackLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:trackLabel];
+    monitorTrackDropdown = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(500, yPos + 4, 160, 24) pullsDown:NO];
+    [monitorTrackDropdown setTarget:self];
+    [monitorTrackDropdown setAction:@selector(onMonitorTrackChanged:)];
+    [contentView addSubview:monitorTrackDropdown];
+    [self refreshMonitorTrackDropdown];
+    yPos -= 32;
+
+    NSTextField* ccLayerLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 150, 20)];
+    [ccLayerLabel setStringValue:@"CC warning layer:"];
+    [ccLayerLabel setFont:[NSFont systemFontOfSize:11]];
+    [ccLayerLabel setBezeled:NO];
+    [ccLayerLabel setEditable:NO];
+    [ccLayerLabel setSelectable:NO];
+    [ccLayerLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:ccLayerLabel];
+
+    ccLayerDropdown = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, yPos + 4, 140, 24) pullsDown:NO];
+    for (int i = 1; i <= 16; ++i) {
+        NSString* title = [NSString stringWithFormat:@"Layer %d", i];
+        [ccLayerDropdown addItemWithTitle:title];
+        [[ccLayerDropdown itemAtIndex:i - 1] setTag:i];
+    }
+    int selectedLayer = std::min(16, std::max(1, cfg.warning_flash_cc_layer));
+    [ccLayerDropdown selectItemAtIndex:selectedLayer - 1];
+    [ccLayerDropdown setTarget:self];
+    [ccLayerDropdown setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:ccLayerDropdown];
+    yPos -= 32;
+
+    yPos -= 4;
+
+    sdAutoRecordCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(20, yPos + 4, 330, 20)];
+    [sdAutoRecordCheckbox setButtonType:NSButtonTypeSwitch];
+    [sdAutoRecordCheckbox setTitle:@"Start/stop WING SD recorder with auto record"];
+    [sdAutoRecordCheckbox setState:cfg.sd_auto_record_with_reaper ? NSControlStateValueOn : NSControlStateValueOff];
+    [sdAutoRecordCheckbox setTarget:self];
+    [sdAutoRecordCheckbox setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:sdAutoRecordCheckbox];
+    yPos -= 30;
+
+    NSTextField* sdSourceLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(40, yPos + 8, 100, 20)];
+    [sdSourceLabel setStringValue:@"SD source:"];
+    [sdSourceLabel setFont:[NSFont systemFontOfSize:11]];
+    [sdSourceLabel setBezeled:NO];
+    [sdSourceLabel setEditable:NO];
+    [sdSourceLabel setSelectable:NO];
+    [sdSourceLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:sdSourceLabel];
+
+    sdSourceDropdown = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(140, yPos + 4, 220, 24) pullsDown:NO];
+    for (int i = 1; i <= 7; i += 2) {
+        NSString* title = [NSString stringWithFormat:@"MAIN %d/%d", i, i + 1];
+        [sdSourceDropdown addItemWithTitle:title];
+        [[sdSourceDropdown itemAtIndex:((i - 1) / 2)] setTag:i];
+    }
+    int selectedLeft = std::max(1, cfg.sd_lr_left_input);
+    int selectedIndex = std::max(0, std::min(3, (selectedLeft - 1) / 2));
+    [sdSourceDropdown selectItemAtIndex:selectedIndex];
+    [sdSourceDropdown setTarget:self];
+    [sdSourceDropdown setAction:@selector(onAutoRecordSettingsChanged:)];
+    [contentView addSubview:sdSourceDropdown];
+    yPos -= 32;
+
+    yPos -= 8;
+
+    meterPreviewLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(20, yPos + 8, 300, 20)];
+    [meterPreviewLabel setStringValue:@"Trigger level: -- dBFS"];
+    [meterPreviewLabel setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
+    [meterPreviewLabel setBezeled:NO];
+    [meterPreviewLabel setEditable:NO];
+    [meterPreviewLabel setSelectable:NO];
+    [meterPreviewLabel setBackgroundColor:[NSColor clearColor]];
+    [contentView addSubview:meterPreviewLabel];
+
+    ccFlashTestButton = [[NSButton alloc] initWithFrame:NSMakeRect(340, yPos + 2, 140, 24)];
+    [ccFlashTestButton setTitle:@"Test CC Flash"];
+    [ccFlashTestButton setBezelStyle:NSBezelStyleRounded];
+    [ccFlashTestButton setTarget:self];
+    [ccFlashTestButton setAction:@selector(onCcFlashTest:)];
+    [contentView addSubview:ccFlashTestButton];
+    yPos -= 34;
     
     // ===== ACTIVITY LOG =====
     NSBox* separator2 = [[NSBox alloc] initWithFrame:NSMakeRect(20, yPos, 660, 1)];
@@ -463,14 +676,15 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     yPos -= 30;
     
     // Activity log scroll view and text view
-    logScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 20, 660, yPos - 20)];
+    const int logHeight = std::max(220, yPos - 20);
+    logScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 20, 660, logHeight)];
     [logScrollView setHasVerticalScroller:YES];
     [logScrollView setHasHorizontalScroller:NO];
     [logScrollView setBorderType:NSBezelBorder];
     [logScrollView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
     [logScrollView setBackgroundColor:[NSColor textBackgroundColor]];
     
-    activityLogView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 640, yPos - 20)];
+    activityLogView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 640, logHeight)];
     [activityLogView setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
     [activityLogView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
     [activityLogView setTextColor:[NSColor labelColor]];
@@ -482,6 +696,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
 
 - (void)updateConnectionStatus {
     isConnected = ReaperExtension::Instance().IsConnected();
+    [self refreshMonitorTrackDropdown];
     
     if (isConnected) {
         [statusLabel setStringValue:@"🟢 Connected"];
@@ -500,6 +715,38 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
     [self updateToggleSoundcheckButtonLabel];
     [self updateSetupSoundcheckButtonLabel];
     [self refreshLiveSetupValidation];
+}
+
+- (void)refreshMonitorTrackDropdown {
+    auto& config = ReaperExtension::Instance().GetConfig();
+    [monitorTrackDropdown removeAllItems];
+
+    [monitorTrackDropdown addItemWithTitle:@"Auto (Armed+Monitored)"];
+    [[monitorTrackDropdown itemAtIndex:0] setTag:0];
+
+    const int track_count = ReaperExtension::Instance().GetProjectTrackCount();
+    for (int i = 1; i <= track_count; ++i) {
+        NSString* title = [NSString stringWithFormat:@"Track %d", i];
+        [monitorTrackDropdown addItemWithTitle:title];
+        [[monitorTrackDropdown itemAtIndex:i] setTag:i];
+    }
+
+    int wanted = std::max(0, config.auto_record_monitor_track);
+    if (wanted > track_count) {
+        wanted = 0;
+        config.auto_record_monitor_track = 0;
+    }
+    [monitorTrackDropdown selectItemAtIndex:wanted];
+}
+
+- (void)onMonitorTrackChanged:(id)sender {
+    (void)sender;
+    auto& config = ReaperExtension::Instance().GetConfig();
+    NSMenuItem* item = [monitorTrackDropdown selectedItem];
+    config.auto_record_monitor_track = item ? (int)[item tag] : 0;
+    ReaperExtension::Instance().ApplyAutoRecordSettings();
+    [self appendToLog:[NSString stringWithFormat:@"Monitor track set to: %d\n", config.auto_record_monitor_track]];
+    [self persistConfigAndLog:@"Saved monitor track setting.\n"];
 }
 
 - (void)updateToggleSoundcheckButtonLabel {
@@ -825,6 +1072,8 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
         [alert addButtonWithTitle:@"OK"];
         [alert runModal];
     }
+
+    [self persistConfigAndLog:@"Saved output mode setting.\n"];
 }
 
 - (void)onMidiActionsToggled:(id)sender {
@@ -847,6 +1096,72 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
         extension.EnableMidiActions(false);
         [self appendToLog:@"MIDI actions disabled\n"];
     }
+    [self persistConfigAndLog:@"Saved MIDI action setting.\n"];
+}
+
+- (void)persistConfigAndLog:(NSString*)message {
+    auto& config = ReaperExtension::Instance().GetConfig();
+    const std::string path = WingConfig::GetConfigPath();
+    if (config.SaveToFile(path)) {
+        if (message) {
+            [self appendToLog:message];
+        }
+    } else {
+        [self appendToLog:@"⚠ Failed to save config.json\n"];
+    }
+}
+
+- (void)onAutoRecordSettingsChanged:(id)sender {
+    auto& config = ReaperExtension::Instance().GetConfig();
+    config.auto_record_enabled = ([autoRecordEnableControl selectedSegment] == 1);
+    config.auto_record_warning_only = ([autoRecordModeControl selectedSegment] == 0);
+    config.auto_record_threshold_db = [[thresholdField stringValue] doubleValue];
+    config.auto_record_hold_ms = std::max(0, [[holdField stringValue] intValue]);
+    NSMenuItem* selectedTrackItem = [monitorTrackDropdown selectedItem];
+    config.auto_record_monitor_track = selectedTrackItem ? (int)[selectedTrackItem tag] : 0;
+    NSMenuItem* selectedLayerItem = [ccLayerDropdown selectedItem];
+    config.warning_flash_cc_layer = selectedLayerItem ? (int)[selectedLayerItem tag] : 1;
+    config.sd_auto_record_with_reaper = ([sdAutoRecordCheckbox state] == NSControlStateValueOn);
+    NSMenuItem* sdItem = [sdSourceDropdown selectedItem];
+    int sdLeft = sdItem ? (int)[sdItem tag] : 1;
+    config.sd_lr_group = "MAIN";
+    config.sd_lr_left_input = sdLeft;
+    config.sd_lr_right_input = sdLeft + 1;
+    ReaperExtension::Instance().ApplyAutoRecordSettings();
+
+    [self appendToLog:[NSString stringWithFormat:@"Auto trigger: %s, mode=%s, source=REAPER, threshold=%.1f dBFS, hold=%dms, track=%d, ccLayer=%d\n",
+                       config.auto_record_enabled ? "ON" : "OFF",
+                       config.auto_record_warning_only ? "WARNING" : "RECORD",
+                       config.auto_record_threshold_db,
+                       config.auto_record_hold_ms,
+                       config.auto_record_monitor_track,
+                       config.warning_flash_cc_layer]];
+    [self persistConfigAndLog:@"Saved auto-trigger settings.\n"];
+}
+
+- (void)onMeterPreviewTimer:(NSTimer*)timer {
+    (void)timer;
+    auto& extension = ReaperExtension::Instance();
+    double lin = extension.ReadCurrentTriggerLevel();
+    if (lin <= 0.0000001) {
+        [meterPreviewLabel setStringValue:@"Trigger level: -inf dBFS"];
+        return;
+    }
+    double db = 20.0 * std::log10(lin);
+    [meterPreviewLabel setStringValue:[NSString stringWithFormat:@"Trigger level: %.1f dBFS", db]];
+}
+
+- (void)onCcFlashTest:(id)sender {
+    (void)sender;
+    [ccFlashTestButton setEnabled:NO];
+    [ccFlashTestButton setTitle:@"Flashing..."];
+    ReaperExtension::Instance().TestWarningFlash();
+    [self appendToLog:@"Manual test: CC flash requested\n"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [ccFlashTestButton setEnabled:YES];
+        [ccFlashTestButton setTitle:@"Test CC Flash"];
+    });
 }
 
 - (void)runSetupSoundcheckFlow {
@@ -959,6 +1274,7 @@ bool ShowChannelSelectionDialog(std::vector<WingConnector::ChannelSelectionInfo>
             extension.SetupSoundcheckFromSelection(blockChannels, setup_soundcheck);
             fprintf(stderr, "[WING] SetupSoundcheckFromSelection complete\n"); fflush(stderr);
             [blockSelf appendToLog:@"✓ Live recording setup complete\n"];
+            [blockSelf refreshMonitorTrackDropdown];
             [blockSelf setWorkingState:NO];
             [blockSelf refreshLiveSetupValidation];
         });

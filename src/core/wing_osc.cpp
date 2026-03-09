@@ -80,6 +80,8 @@
 #include <algorithm>
 #include <fstream>
 #include <ctime>
+#include <cstdio>
+#include <cmath>
 
 #if !defined(_WIN32)
 #include <sys/socket.h>
@@ -948,6 +950,225 @@ void WingOSC::SetCardInputName(int card_num, const std::string& name) {
     Log("[OSC] " + addr_name + " = " + name);
 }
 
+void WingOSC::RequestMeterValue(const std::string& address_template, int channel_num) {
+    std::string address = address_template;
+    if (address.find('%') != std::string::npos) {
+        char formatted[256];
+        snprintf(formatted, sizeof(formatted), address_template.c_str(), channel_num);
+        address = formatted;
+    }
+
+    char buffer[256];
+    osc::OutboundPacketStream p(buffer, 256);
+    p << MakeOscBeginToken(address.c_str()) << MakeOscEndToken();
+    if (!SendRawPacket(p.Data(), p.Size())) {
+        Log("Failed meter request: " + address);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    last_meter_address_ = address;
+}
+
+double WingOSC::GetLastMeterLinearValue(int value_index) const {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (value_index < 0 || value_index >= static_cast<int>(last_meter_values_.size())) {
+        return 0.0;
+    }
+    return last_meter_values_[value_index];
+}
+
+std::vector<double> WingOSC::GetLastMeterValues() const {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    return last_meter_values_;
+}
+
+void WingOSC::StartSDRecorder() {
+    const std::vector<std::string> paths = {
+        "/sdrec/state", "/sdrec/start", "/recorder/sd/state", "/recorder/sd/start"
+    };
+    for (const auto& path : paths) {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        p << MakeOscBeginToken(path.c_str()) << (int32_t)1 << MakeOscEndToken();
+        if (SendRawPacket(p.Data(), p.Size())) {
+            Log("SD start OSC sent: " + path);
+        }
+    }
+}
+
+void WingOSC::StopSDRecorder() {
+    const std::vector<std::string> paths = {
+        "/sdrec/state", "/sdrec/stop", "/recorder/sd/state", "/recorder/sd/stop"
+    };
+    for (const auto& path : paths) {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        p << MakeOscBeginToken(path.c_str()) << (int32_t)0 << MakeOscEndToken();
+        if (SendRawPacket(p.Data(), p.Size())) {
+            Log("SD stop OSC sent: " + path);
+        }
+    }
+}
+
+void WingOSC::SetUserControlLed(int layer, int button, bool on) {
+    if (layer <= 0 || button <= 0) {
+        return;
+    }
+    char buffer[256];
+    osc::OutboundPacketStream p(buffer, 256);
+    const std::string addr_a = "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/led";
+    p << MakeOscBeginToken(addr_a.c_str()) << (int32_t)(on ? 1 : 0) << MakeOscEndToken();
+    SendRawPacket(p.Data(), p.Size());
+
+    p.Clear();
+    const std::string addr_b = "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/config/led";
+    p << MakeOscBeginToken(addr_b.c_str()) << (int32_t)(on ? 1 : 0) << MakeOscEndToken();
+    SendRawPacket(p.Data(), p.Size());
+}
+
+void WingOSC::SetUserControlColor(int layer, int button, int color_index) {
+    if (layer <= 0 || button <= 0) {
+        return;
+    }
+    char buffer[256];
+    osc::OutboundPacketStream p(buffer, 256);
+    const std::string addr_a = "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/col";
+    p << MakeOscBeginToken(addr_a.c_str()) << (int32_t)color_index << MakeOscEndToken();
+    SendRawPacket(p.Data(), p.Size());
+
+    p.Clear();
+    const std::string addr_b = "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/config/col";
+    p << MakeOscBeginToken(addr_b.c_str()) << (int32_t)color_index << MakeOscEndToken();
+    SendRawPacket(p.Data(), p.Size());
+}
+
+void WingOSC::SetActiveUserControlLayer(int layer) {
+    if (layer <= 0) {
+        return;
+    }
+    const std::vector<std::string> paths = {
+        "/$ctl/user/layer",
+        "/$ctl/user/page",
+        "/$ctl/user/sel",
+        "/$ctl/layer/user"
+    };
+    for (const auto& path : paths) {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        p << MakeOscBeginToken(path.c_str()) << (int32_t)layer << MakeOscEndToken();
+        SendRawPacket(p.Data(), p.Size());
+    }
+}
+
+void WingOSC::SetUserControlRotaryName(int layer, int rotary, const std::string& name) {
+    if (layer <= 0 || rotary <= 0) {
+        return;
+    }
+    const std::vector<int> layer_candidates = {layer, std::max(0, layer - 1)};
+    const std::vector<int> rotary_candidates = {rotary};
+    for (int ly : layer_candidates) {
+        for (int ry : rotary_candidates) {
+            const std::vector<std::string> paths = {
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/enc/name",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/enc/$fname",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/config/name",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/config/name",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/config/name",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/config/name",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/config/name"
+            };
+            for (const auto& path : paths) {
+                char buffer[256];
+                osc::OutboundPacketStream p(buffer, 256);
+                p << MakeOscBeginToken(path.c_str()) << name.c_str() << MakeOscEndToken();
+                SendRawPacket(p.Data(), p.Size());
+
+                p.Clear();
+                p << MakeOscBeginToken(path.c_str()) << name.c_str() << 0.0f << (int32_t)0 << MakeOscEndToken();
+                SendRawPacket(p.Data(), p.Size());
+            }
+        }
+    }
+}
+
+void WingOSC::QueryUserControlColor(int layer, int button) {
+    if (layer <= 0 || button <= 0) {
+        return;
+    }
+    const std::vector<std::string> paths = {
+        "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/col",
+        "/$ctl/user/" + std::to_string(layer) + "/" + std::to_string(button) + "/config/col"
+    };
+    for (const auto& path : paths) {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        p << MakeOscBeginToken(path.c_str()) << MakeOscEndToken();
+        SendRawPacket(p.Data(), p.Size());
+    }
+}
+
+int WingOSC::GetCachedUserControlColor(int layer, int button, int fallback) const {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    auto it = user_control_color_cache_.find({layer, button});
+    if (it == user_control_color_cache_.end()) {
+        return fallback;
+    }
+    return it->second;
+}
+
+void WingOSC::QueryUserControlRotaryText(int layer, int rotary) {
+    if (layer <= 0 || rotary <= 0) {
+        return;
+    }
+    const std::vector<int> layer_candidates = {layer, std::max(0, layer - 1)};
+    const std::vector<int> rotary_candidates = {rotary};
+    for (int ly : layer_candidates) {
+        for (int ry : rotary_candidates) {
+            const std::vector<std::string> paths = {
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/enc/name",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/enc/$fname",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/name",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/txt",
+                "/$ctl/user/" + std::to_string(ly) + "/rot/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/rotary/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/enc/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/knob/" + std::to_string(ry) + "/label",
+                "/$ctl/user/" + std::to_string(ly) + "/" + std::to_string(ry) + "/label"
+            };
+            for (const auto& path : paths) {
+                char buffer[256];
+                osc::OutboundPacketStream p(buffer, 256);
+                p << MakeOscBeginToken(path.c_str()) << MakeOscEndToken();
+                SendRawPacket(p.Data(), p.Size());
+            }
+        }
+    }
+}
+
 void WingOSC::ClearUSBOutput(int usb_num) {
     char buffer[256];
     osc::OutboundPacketStream p(buffer, 256);
@@ -1723,6 +1944,114 @@ void WingOSC::QueryAllChannels(int count) {
 void WingOSC::HandleOscMessage(const std::string& address, const void* data, size_t /* size */) {
     auto* msg = static_cast<const osc::ReceivedMessage*>(data);
     Log("OSC rx: " + address);
+
+    // Capture user control color responses for later reuse (e.g. recording state color restore).
+    {
+        const std::string prefix = "/$ctl/user/";
+        if (address.rfind(prefix, 0) == 0 &&
+            (address.find("/name") != std::string::npos ||
+             address.find("/txt") != std::string::npos ||
+             address.find("/label") != std::string::npos)) {
+            auto arg = msg->ArgumentsBegin();
+            if (arg != msg->ArgumentsEnd()) {
+                if (arg->IsString()) {
+                    Log("UserCtl text rx: " + address + " = \"" + std::string(arg->AsString()) + "\"");
+                } else if (arg->IsInt32()) {
+                    Log("UserCtl text rx(int): " + address + " = " + std::to_string(arg->AsInt32()));
+                } else if (arg->IsFloat()) {
+                    Log("UserCtl text rx(float): " + address + " = " + std::to_string(arg->AsFloat()));
+                }
+            }
+        }
+
+        if (address.rfind(prefix, 0) == 0 &&
+            (address.size() >= 4) &&
+            (address.find("/col") != std::string::npos)) {
+            // Patterns: /$ctl/user/<layer>/<button>/col and /$ctl/user/<layer>/<button>/config/col
+            size_t pos = prefix.size();
+            size_t slash1 = address.find('/', pos);
+            if (slash1 != std::string::npos) {
+                size_t slash2 = address.find('/', slash1 + 1);
+                if (slash2 != std::string::npos) {
+                    int layer = 0;
+                    int button = 0;
+                    try {
+                        layer = std::stoi(address.substr(pos, slash1 - pos));
+                        button = std::stoi(address.substr(slash1 + 1, slash2 - slash1 - 1));
+                    } catch (...) {
+                        layer = 0;
+                        button = 0;
+                    }
+                    if (layer > 0 && button > 0) {
+                        auto arg = msg->ArgumentsBegin();
+                        if (arg != msg->ArgumentsEnd() && arg->IsInt32()) {
+                            int color = arg->AsInt32();
+                            std::lock_guard<std::mutex> lock(data_mutex_);
+                            user_control_color_cache_[{layer, button}] = color;
+                            Log("UserCtl color learned: layer=" + std::to_string(layer) +
+                                " button=" + std::to_string(button) +
+                                " color=" + std::to_string(color));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Meter responses can come back as scalar args or blobs.
+    // We parse into linear values [0..1+] and cache for trigger logic.
+    if (address.rfind("/meters", 0) == 0 || address == last_meter_address_) {
+        std::vector<double> meter_values;
+        try {
+            auto arg = msg->ArgumentsBegin();
+            if (arg != msg->ArgumentsEnd()) {
+                if (arg->IsFloat()) {
+                    double v = arg->AsFloat();
+                    meter_values.push_back(v > 1.5 ? std::pow(10.0, v / 20.0) : std::max(0.0, v));
+                } else if (arg->IsInt32()) {
+                    double v = static_cast<double>(arg->AsInt32());
+                    meter_values.push_back(v > 1.5 ? std::pow(10.0, v / 20.0) : std::max(0.0, v));
+                } else if (arg->IsBlob()) {
+                    const void* blob_data = nullptr;
+                    osc::osc_bundle_element_size_t blob_size = 0;
+                    arg->AsBlob(blob_data, blob_size);
+                    const auto* bytes = static_cast<const uint8_t*>(blob_data);
+
+                    // Heuristic 1: float array payload.
+                    if (blob_size >= 4 && (blob_size % 4) == 0) {
+                        for (osc::osc_bundle_element_size_t i = 0; i + 3 < blob_size; i += 4) {
+                            uint32_t u = (static_cast<uint32_t>(bytes[i]) << 24) |
+                                         (static_cast<uint32_t>(bytes[i + 1]) << 16) |
+                                         (static_cast<uint32_t>(bytes[i + 2]) << 8) |
+                                         static_cast<uint32_t>(bytes[i + 3]);
+                            float f = 0.0f;
+                            std::memcpy(&f, &u, sizeof(float));
+                            if (std::isfinite(f)) {
+                                meter_values.push_back(f > 1.5f ? std::pow(10.0, f / 20.0) : std::max(0.0f, f));
+                            }
+                        }
+                    }
+
+                    // Heuristic 2 fallback: signed 16-bit meter words.
+                    if (meter_values.empty() && blob_size >= 2) {
+                        for (osc::osc_bundle_element_size_t i = 0; i + 1 < blob_size; i += 2) {
+                            int16_t s = static_cast<int16_t>((bytes[i] << 8) | bytes[i + 1]);
+                            double norm = static_cast<double>(std::max<int16_t>(0, s)) / 32767.0;
+                            meter_values.push_back(norm);
+                        }
+                    }
+                }
+            }
+        } catch (osc::Exception& e) {
+            Log(std::string("Error parsing meter OSC message: ") + e.what());
+        }
+
+        if (!meter_values.empty()) {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            last_meter_values_ = meter_values;
+        }
+        return;
+    }
     
     // Helper: skip N args and return iterator
     auto skip = [&](osc::ReceivedMessage::const_iterator it, int n) {

@@ -11,6 +11,7 @@ struct reaper_plugin_info_t;
 #include <atomic>
 #include <vector>
 #include <functional>
+#include <thread>
 
 namespace WingConnector {
 
@@ -48,6 +49,13 @@ public:
     void SetupSoundcheckFromSelection(const std::vector<ChannelSelectionInfo>& channels, bool setup_soundcheck = true);
     bool CheckOutputModeAvailability(const std::string& output_mode, std::string& details) const;
     bool ValidateLiveRecordingSetup(std::string& details);
+    void RouteMainLRToCardForSDRecording();
+    double ReadCurrentTriggerLevel();
+    void SendWarningOscNow();
+    void SendStartOscNow();
+    void SendStopOscNow();
+    void TestWarningFlash();
+    void ApplyAutoRecordSettings();
     
     // MIDI action mapping
     void EnableMidiActions(bool enable);
@@ -65,6 +73,7 @@ public:
     // Real-time monitoring (deprecated but kept for compatibility)
     void EnableMonitoring(bool enable);
     bool IsMonitoring() const { return monitoring_enabled_; }
+    int GetProjectTrackCount() const;
     
     // Status
     bool IsConnected() const { return connected_; }
@@ -84,6 +93,7 @@ public:
     
     // MIDI input hook (needed by extern wrapper function)
     static bool MidiInputHook(bool is_midi, const unsigned char* data, int len, int dev_id);
+    static void MainThreadTimerTick();
 
 private:
     ReaperExtension();
@@ -129,10 +139,31 @@ private:
     
     // MIDI input handling  
     void ProcessMidiInput(const unsigned char* data, int len);
+    void MonitorAutoRecordLoop();
+    void StartAutoRecordMonitor();
+    void StopAutoRecordMonitor();
+    double GetMaxArmedTrackPeak() const;
+    void StartWarningFlash();
+    void StopWarningFlash(bool force = false);
+    void WarningFlashLoop();
+    void SetWarningLayerState();
+    void SetRecordingLayerState();
+    void ClearLayerState();
+    void ApplySDRoutingNoDialog();
     
     // Callbacks
     void OnChannelDataReceived(const ChannelInfo& channel);
     void OnConnectionStatusChanged(bool connected);
+
+    std::atomic<bool> auto_record_monitor_running_{false};
+    std::unique_ptr<std::thread> auto_record_monitor_thread_;
+    std::atomic<bool> auto_record_started_by_plugin_{false};
+    std::atomic<bool> warning_flash_running_{false};
+    std::unique_ptr<std::thread> warning_flash_thread_;
+    std::atomic<bool> manual_flash_override_{false};
+    std::atomic<bool> pending_record_start_{false};
+    std::atomic<bool> pending_record_stop_{false};
+    std::atomic<int> layer_state_mode_{0}; // 0=idle, 1=warning, 2=recording
 };
 
 // Reaper action command IDs

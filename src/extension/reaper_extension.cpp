@@ -19,11 +19,14 @@
 #include <algorithm>
 #include <set>
 #include <ctime>
+#include <cmath>
 #ifdef _WIN32
 #include <sys/utime.h>
 #else
 #include <utime.h>
 #endif
+#include "osc/OscOutboundPacketStream.h"
+#include "ip/UdpSocket.h"
 
 // C-style wrapper function for MIDI hook (REAPER requires a C function, not a member function)
 extern "C" bool WingMidiInputHookWrapper(bool is_midi, const unsigned char* data, int len, int dev_id) {
@@ -35,6 +38,26 @@ namespace WingConnector {
 namespace {
 constexpr int kChannelQueryAttempts = 2;
 constexpr int kQueryResponseWaitMs = 600;  // Wait time for OSC responses after sending all queries
+constexpr int kReaperPlayStateRecordingBit = 4;
+
+void SendOscMessage(const std::string& host, int port, const std::string& address, int value = 1) {
+    if (host.empty() || port <= 0 || address.empty()) {
+        return;
+    }
+    try {
+        char buffer[256];
+        osc::OutboundPacketStream p(buffer, 256);
+        p << osc::BeginMessage(address.c_str()) << (int32_t)value << osc::EndMessage;
+        UdpTransmitSocket tx(IpEndpointName(host.c_str(), static_cast<uint16_t>(port)));
+        tx.Send(p.Data(), p.Size());
+    } catch (...) {
+        // Never let OSC notification failures break transport control flow.
+    }
+}
+
+void SendOscToWing(const WingConfig& cfg, const std::string& address, int value = 1) {
+    SendOscMessage(cfg.wing_ip, 2223, address, value);
+}
 
 bool TouchFile(const std::string& path) {
     time_t now = time(nullptr);
@@ -191,14 +214,32 @@ bool ReaperExtension::Initialize(reaper_plugin_info_t* rec) {
     
     fprintf(stderr, "🔧 [WING] ReaperExtension::Initialize() complete\n");
     fflush(stderr);
+
+    if (g_rec_) {
+        g_rec_->Register("timer", (void*)ReaperExtension::MainThreadTimerTick);
+    }
     
     return true;
 }
 
 void ReaperExtension::Shutdown() {
+    if (g_rec_) {
+        g_rec_->Register("-timer", (void*)ReaperExtension::MainThreadTimerTick);
+    }
+    StopAutoRecordMonitor();
     EnableMidiActions(false);
     DisconnectFromWing();
     track_manager_.reset();
+}
+
+void ReaperExtension::MainThreadTimerTick() {
+    auto& ext = ReaperExtension::Instance();
+    if (ext.pending_record_start_.exchange(false)) {
+        Main_OnCommand(1013, 0);  // Transport: Record (main thread)
+    }
+    if (ext.pending_record_stop_.exchange(false)) {
+        Main_OnCommand(1016, 0);  // Transport: Stop (main thread)
+    }
 }
 
 // Connects and verifies OSC reachability only; track creation is user-driven.
@@ -249,6 +290,7 @@ bool ReaperExtension::ConnectToWing() {
     Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Connected!\n");
     connected_ = true;
     status_message_ = "Connected";
+    StartAutoRecordMonitor();
     
     // Query console info
     const auto& wing_info = osc_handler_->GetWingInfo();
@@ -260,6 +302,10 @@ bool ReaperExtension::ConnectToWing() {
                  wing_info.name.empty() ? "Unnamed" : wing_info.name.c_str(),
                  wing_info.firmware.empty() ? "unknown" : wing_info.firmware.c_str());
         Log(info_msg);
+    }
+
+    if (config_.sd_lr_route_enabled) {
+        RouteMainLRToCardForSDRecording();
     }
     
     return true;
@@ -772,6 +818,7 @@ void ReaperExtension::DisconnectFromWing() {
     if (!connected_) {
         return;
     }
+    StopAutoRecordMonitor();
     
     Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Disconnecting...\n");
     
@@ -889,6 +936,373 @@ void ReaperExtension::EnableMonitoring(bool enable) {
         status_message_ = "Monitoring inactive";
     }
 }
+
+int ReaperExtension::GetProjectTrackCount() const {
+    ReaProject* proj = EnumProjects(-1, nullptr, 0);
+    return proj ? CountTracks(proj) : 0;
+}
+
+void ReaperExtension::StartAutoRecordMonitor() {
+    if (!config_.auto_record_enabled || auto_record_monitor_running_) {
+        return;
+    }
+    auto_record_monitor_running_ = true;
+    auto_record_monitor_thread_ = std::make_unique<std::thread>(&ReaperExtension::MonitorAutoRecordLoop, this);
+    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Auto-record monitor started\n");
+}
+
+void ReaperExtension::StopAutoRecordMonitor() {
+    if (!auto_record_monitor_running_) {
+        return;
+    }
+    auto_record_monitor_running_ = false;
+    if (auto_record_monitor_thread_ && auto_record_monitor_thread_->joinable()) {
+        auto_record_monitor_thread_->join();
+    }
+    auto_record_monitor_thread_.reset();
+    auto_record_started_by_plugin_ = false;
+    StopWarningFlash();
+    ClearLayerState();
+    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Auto-record monitor stopped\n");
+}
+
+void ReaperExtension::ApplyAutoRecordSettings() {
+    StopAutoRecordMonitor();
+    if (connected_ && config_.auto_record_enabled) {
+        StartAutoRecordMonitor();
+    }
+}
+
+double ReaperExtension::GetMaxArmedTrackPeak() const {
+    ReaProject* proj = EnumProjects(-1, nullptr, 0);
+    if (!proj) {
+        return 0.0;
+    }
+
+    const int track_count = CountTracks(proj);
+    double max_peak = 0.0;
+    int start_i = 0;
+    int end_i = track_count;
+    if (config_.auto_record_monitor_track > 0) {
+        start_i = std::min(track_count, std::max(0, config_.auto_record_monitor_track - 1));
+        end_i = std::min(track_count, start_i + 1);
+    }
+
+    const bool specific_track_mode = (config_.auto_record_monitor_track > 0);
+    for (int i = start_i; i < end_i; ++i) {
+        MediaTrack* track = GetTrack(proj, i);
+        if (!track) {
+            continue;
+        }
+
+        if (!specific_track_mode) {
+            const int rec_arm = static_cast<int>(GetMediaTrackInfo_Value(track, "I_RECARM"));
+            const int rec_mon = static_cast<int>(GetMediaTrackInfo_Value(track, "I_RECMON"));
+            if (rec_arm <= 0 || rec_mon <= 0) {
+                continue;
+            }
+        }
+
+        const double peak_l = Track_GetPeakInfo(track, 0);
+        const double peak_r = Track_GetPeakInfo(track, 1);
+        max_peak = std::max(max_peak, std::max(peak_l, peak_r));
+    }
+    return max_peak;
+}
+
+void ReaperExtension::MonitorAutoRecordLoop() {
+    const double threshold_lin = std::pow(10.0, config_.auto_record_threshold_db / 20.0);
+    const auto poll_interval = std::chrono::milliseconds(std::max(10, config_.auto_record_poll_ms));
+    const auto attack_needed = std::chrono::milliseconds(std::max(50, config_.auto_record_attack_ms));
+    const auto hold_needed = std::chrono::milliseconds(std::max(0, config_.auto_record_hold_ms));
+    const auto release_needed = std::chrono::milliseconds(std::max(100, config_.auto_record_release_ms));
+    const auto min_record_time = std::chrono::milliseconds(std::max(0, config_.auto_record_min_record_ms));
+
+    auto above_since = std::chrono::steady_clock::time_point{};
+    auto below_since = std::chrono::steady_clock::time_point{};
+    auto record_started_at = std::chrono::steady_clock::time_point{};
+    auto last_signal_at = std::chrono::steady_clock::time_point{};
+    auto last_warning_event_at = std::chrono::steady_clock::time_point{};
+
+    while (auto_record_monitor_running_) {
+        const auto now = std::chrono::steady_clock::now();
+        double peak = GetMaxArmedTrackPeak();
+        const bool above = peak >= threshold_lin;
+        const bool is_recording = (GetPlayState() & kReaperPlayStateRecordingBit) != 0;
+        if (above) {
+            last_signal_at = now;
+        }
+
+        if (!is_recording) {
+            if (above) {
+                if (above_since.time_since_epoch().count() == 0) {
+                    above_since = now;
+                } else if (now - above_since >= attack_needed) {
+                    if (!warning_flash_running_) {
+                        StartWarningFlash();
+                        SetWarningLayerState();
+                        Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Signal above threshold long enough - starting CC flash warning\n");
+                    }
+                    if (config_.auto_record_warning_only) {
+                        const bool hold_active = last_warning_event_at.time_since_epoch().count() != 0 &&
+                                                 (now - last_warning_event_at < hold_needed);
+                        if (hold_active) {
+                            above_since = {};
+                            below_since = {};
+                            std::this_thread::sleep_for(poll_interval);
+                            continue;
+                        }
+                        last_warning_event_at = now;
+                        Log("AUDIOLAB.wing.reaper.virtualsoundcheck: WARNING trigger (signal above threshold)\n");
+                        SendOscToWing(config_, config_.osc_warning_path, 1);
+                    } else {
+                        if (warning_flash_running_) {
+                            Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Recording started - stopping CC flash warning\n");
+                            StopWarningFlash();
+                        }
+                        SetRecordingLayerState();
+                        pending_record_start_ = true;
+                        auto_record_started_by_plugin_ = true;
+                        record_started_at = std::chrono::steady_clock::now();
+                        if (config_.sd_auto_record_with_reaper && osc_handler_) {
+                            ApplySDRoutingNoDialog();
+                            osc_handler_->StartSDRecorder();
+                        }
+                        SendOscToWing(config_, config_.osc_start_path, 1);
+                    }
+                    above_since = {};
+                    below_since = {};
+                    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Trigger fired (signal above threshold)\n");
+                }
+            } else {
+                above_since = {};
+                const bool hold_expired = last_signal_at.time_since_epoch().count() == 0 ||
+                                          (now - last_signal_at >= hold_needed);
+                if (warning_flash_running_ && hold_expired && !manual_flash_override_) {
+                    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Signal dropped below threshold - stopping CC flash warning\n");
+                    StopWarningFlash();
+                    ClearLayerState();
+                }
+            }
+        } else {
+            StopWarningFlash();
+            SetRecordingLayerState();
+            if (!auto_record_started_by_plugin_) {
+                // Respect manual recording state and avoid auto-stop in this case.
+                above_since = {};
+                below_since = {};
+                std::this_thread::sleep_for(poll_interval);
+                continue;
+            }
+
+            if (above) {
+                below_since = {};
+            } else {
+                if (below_since.time_since_epoch().count() == 0) {
+                    below_since = now;
+                } else if (now - below_since >= release_needed &&
+                           (last_signal_at.time_since_epoch().count() == 0 || now - last_signal_at >= hold_needed) &&
+                           now - record_started_at >= min_record_time) {
+                    pending_record_stop_ = true;
+                    if (config_.sd_auto_record_with_reaper && osc_handler_) {
+                        osc_handler_->StopSDRecorder();
+                    }
+                    SendOscToWing(config_, config_.osc_stop_path, 0);
+                    auto_record_started_by_plugin_ = false;
+                    ClearLayerState();
+                    above_since = {};
+                    below_since = {};
+                    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Auto-record stopped (signal below threshold)\n");
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(poll_interval);
+    }
+}
+
+void ReaperExtension::SetWarningLayerState() {
+    if (!osc_handler_) {
+        return;
+    }
+    if (layer_state_mode_.load() == 1) {
+        return;
+    }
+    layer_state_mode_ = 1;
+    const int layer = std::min(16, std::max(1, config_.warning_flash_cc_layer));
+    osc_handler_->SetActiveUserControlLayer(layer);
+    for (int b = 1; b <= 4; ++b) {
+        osc_handler_->QueryUserControlColor(layer, b);
+    }
+    osc_handler_->QueryUserControlRotaryText(layer, 1);
+    osc_handler_->SetUserControlRotaryName(layer, 1, "RECORDING");
+    osc_handler_->SetUserControlRotaryName(layer, 2, "NOT ENABLED");
+    osc_handler_->SetUserControlRotaryName(layer, 3, "!!");
+}
+
+void ReaperExtension::SetRecordingLayerState() {
+    if (!osc_handler_) {
+        return;
+    }
+    if (layer_state_mode_.load() == 2) {
+        return;
+    }
+    layer_state_mode_ = 2;
+    const int layer = std::min(16, std::max(1, config_.warning_flash_cc_layer));
+    osc_handler_->SetActiveUserControlLayer(layer);
+    osc_handler_->QueryUserControlRotaryText(layer, 1);
+    osc_handler_->SetUserControlRotaryName(layer, 1, "REAPER");
+    osc_handler_->SetUserControlRotaryName(layer, 2, "STARTED");
+    osc_handler_->SetUserControlRotaryName(layer, 3, "RECORDING");
+    osc_handler_->SetUserControlRotaryName(layer, 4, "...");
+    const int recording_color = 6; // Force green for recording
+    for (int b = 1; b <= 4; ++b) {
+        osc_handler_->SetUserControlColor(layer, b, recording_color);
+        osc_handler_->SetUserControlLed(layer, b, true); // Steady on
+    }
+}
+
+void ReaperExtension::ClearLayerState() {
+    if (!osc_handler_) {
+        return;
+    }
+    layer_state_mode_ = 0;
+    const int layer = std::min(16, std::max(1, config_.warning_flash_cc_layer));
+    for (int b = 1; b <= 4; ++b) {
+        osc_handler_->SetUserControlLed(layer, b, false);
+    }
+    osc_handler_->SetUserControlRotaryName(layer, 1, "");
+    osc_handler_->SetUserControlRotaryName(layer, 2, "");
+    osc_handler_->SetUserControlRotaryName(layer, 3, "");
+    osc_handler_->SetUserControlRotaryName(layer, 4, "");
+}
+
+void ReaperExtension::StartWarningFlash() {
+    if (warning_flash_running_ || !osc_handler_) {
+        return;
+    }
+    warning_flash_running_ = true;
+    warning_flash_thread_ = std::make_unique<std::thread>(&ReaperExtension::WarningFlashLoop, this);
+}
+
+void ReaperExtension::StopWarningFlash(bool force) {
+    if (manual_flash_override_ && !force) {
+        return;
+    }
+    if (!warning_flash_running_) {
+        return;
+    }
+    warning_flash_running_ = false;
+    if (warning_flash_thread_ && warning_flash_thread_->joinable()) {
+        warning_flash_thread_->join();
+    }
+    warning_flash_thread_.reset();
+    if (osc_handler_) {
+        const int layer = std::min(16, std::max(1, config_.warning_flash_cc_layer));
+        for (int b = 1; b <= 4; ++b) {
+            osc_handler_->SetUserControlLed(layer, b, false);
+        }
+    }
+}
+
+void ReaperExtension::WarningFlashLoop() {
+    if (!osc_handler_) {
+        warning_flash_running_ = false;
+        return;
+    }
+    const int layer = std::min(16, std::max(1, config_.warning_flash_cc_layer));
+    const int color = 9; // Warning is fixed red
+    for (int b = 1; b <= 4; ++b) {
+        osc_handler_->SetUserControlColor(layer, b, color);
+    }
+
+    const int sequence[] = {1, 2, 3, 4, 3, 2};
+    size_t seq_idx = 0;
+    while (warning_flash_running_) {
+        const int active = sequence[seq_idx];
+        for (int b = 1; b <= 4; ++b) {
+            osc_handler_->SetUserControlLed(layer, b, b == active);
+        }
+        seq_idx = (seq_idx + 1) % (sizeof(sequence) / sizeof(sequence[0]));
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    }
+}
+
+void ReaperExtension::RouteMainLRToCardForSDRecording() {
+    if (!connected_ || !osc_handler_) {
+        ShowMessageBox(
+            "Not connected to Wing console.\nPlease connect first.",
+            "AUDIOLAB.wing.reaper.virtualsoundcheck",
+            0
+        );
+        return;
+    }
+
+    const int left_input = std::max(1, config_.sd_lr_left_input);
+    const int right_input = std::max(1, config_.sd_lr_right_input);
+    const std::string group = config_.sd_lr_group.empty() ? "MAIN" : config_.sd_lr_group;
+
+    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Routing Main LR to CARD 1/2 for SD recording...\n");
+    osc_handler_->SetCardOutputSource(1, group, left_input);
+    osc_handler_->SetCardOutputSource(2, group, right_input);
+    osc_handler_->SetCardOutputName(1, "Main L");
+    osc_handler_->SetCardOutputName(2, "Main R");
+
+    const std::string msg = "Configured CARD outputs: 1=" + group + ":" + std::to_string(left_input) +
+                            ", 2=" + group + ":" + std::to_string(right_input) + "\n";
+    Log(msg);
+    ShowMessageBox(
+        "Configured CARD 1/2 from Main LR source.\nUse Wing SD recorder to start capture.",
+        "AUDIOLAB.wing.reaper.virtualsoundcheck",
+        0
+    );
+}
+
+void ReaperExtension::ApplySDRoutingNoDialog() {
+    if (!osc_handler_) {
+        return;
+    }
+    const int left_input = std::max(1, config_.sd_lr_left_input);
+    const int right_input = std::max(1, config_.sd_lr_right_input);
+    const std::string group = config_.sd_lr_group.empty() ? "MAIN" : config_.sd_lr_group;
+    osc_handler_->SetCardOutputSource(1, group, left_input);
+    osc_handler_->SetCardOutputSource(2, group, right_input);
+    osc_handler_->SetCardOutputName(1, "Main L");
+    osc_handler_->SetCardOutputName(2, "Main R");
+}
+
+double ReaperExtension::ReadCurrentTriggerLevel() {
+    return GetMaxArmedTrackPeak();
+}
+
+void ReaperExtension::SendWarningOscNow() {
+    SendOscToWing(config_, config_.osc_warning_path, 1);
+}
+
+void ReaperExtension::SendStartOscNow() {
+    SendOscToWing(config_, config_.osc_start_path, 1);
+}
+
+void ReaperExtension::SendStopOscNow() {
+    SendOscToWing(config_, config_.osc_stop_path, 0);
+}
+
+void ReaperExtension::TestWarningFlash() {
+    if (!osc_handler_) {
+        Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Cannot test CC flash while disconnected\n");
+        return;
+    }
+    manual_flash_override_ = true;
+    StartWarningFlash();
+    Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Test CC flash started\n");
+    std::thread([this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        manual_flash_override_ = false;
+        StopWarningFlash(true);
+        Log("AUDIOLAB.wing.reaper.virtualsoundcheck: Test CC flash stopped\n");
+    }).detach();
+}
+
 
 void ReaperExtension::ConfigureVirtualSoundcheck() {
     if (!connected_ || !osc_handler_) {

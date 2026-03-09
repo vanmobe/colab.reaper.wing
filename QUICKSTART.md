@@ -58,6 +58,54 @@ Full setup steps:
 
 - [snapshots/README.md](snapshots/README.md)
 
+## 6. Optional: Auto-Record Trigger
+
+The extension can auto-start/stop REAPER recording based on signal activity on armed + monitored tracks.
+
+Set these in `config.json`:
+
+- `auto_record_enabled` = `true`
+- `auto_record_threshold_db` (example: `-40.0`)
+- `auto_record_attack_ms`
+- `auto_record_release_ms`
+- `auto_record_min_record_ms`
+
+Then reconnect to WING so the monitor loop starts.
+
+UI support:
+- Configure these directly in the main plugin window under `Auto Trigger`.
+- `Mode` supports `WARNING` (no transport start) and `RECORD`.
+- Signal detection is REAPER-based (armed + monitored tracks).
+- `Monitor track` can target a specific REAPER track (`0` = auto across armed+monitored tracks).
+- `Hold ms` keeps warning/record active briefly after drops to avoid rapid stop/start chatter.
+- Live meter preview is shown as `Trigger level` in the dialog.
+- Use `Test CC Flash` to verify the WING warning LEDs (buttons 1-4) flash correctly.
+
+## 7. Optional: Route Main LR to SD (CARD 1/2)
+
+Use REAPER action list:
+
+- `AUDIOLAB.wing.reaper.virtualsoundcheck: Route Main LR to CARD 1/2 (SD)`
+
+This sets CARD output routing for SD LR recording based on:
+
+- `sd_lr_group`
+- `sd_lr_left_input`
+- `sd_lr_right_input`
+
+If `sd_auto_record_with_reaper` is enabled, SD recorder start/stop OSC commands are also sent when auto-record starts/stops.
+The plugin now sends a fallback list of SD recorder OSC paths for better firmware compatibility.
+
+## 8. Optional: OSC Notifications
+
+Enable `OSC Out notifications` in the UI (or config) to emit trigger events:
+
+- warning: `osc_warning_path`
+- start: `osc_start_path`
+- stop: `osc_stop_path`
+
+Destination is configured by `osc_out_host` + `osc_out_port`.
+
 ## Troubleshooting Checklist
 
 - Confirm WING and computer are on the same network.

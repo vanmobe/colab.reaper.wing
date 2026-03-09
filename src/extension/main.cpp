@@ -32,6 +32,9 @@
 #define FCONTROL  0x08  // Ctrl modifier
 #define FSHIFT    0x04  // Shift modifier
 #define FALT      0x10  // Alt modifier
+#ifndef FCOMMAND
+#define FCOMMAND  0x20  // Cmd modifier on macOS (fallback when not provided by headers)
+#endif
 
 using namespace WingConnector;
 
@@ -86,7 +89,7 @@ static bool OnAction(KbdSectionInfo* sec, int cmd, int val, int valhw, int relmo
  * 
  * Register with REAPER:
  * 1. hookcommand2 callback to intercept user commands
- * 2. Custom action "Wing: Connect to Behringer Wing"
+ * 2. Custom action "Behringer Wing: Configure Virtual Soundcheck/Recording"
  * 3. Optional keyboard shortcut Ctrl+Shift+W
  *
  * REAPER will:
@@ -115,7 +118,7 @@ static void RegisterCommands() {
     
     action.uniqueSectionId = 0;           // Main action section
     action.idStr = "_AUDIOLAB_VIRTUALSOUNDCHECK_MAIN_DIALOG";   // Unique ID for this action
-    action.name = "AUDIOLAB.wing.reaper.virtualsoundcheck: Connect to Behringer Wing";  // Menu label
+    action.name = "Behringer Wing: Configure Virtual Soundcheck/Recording";  // Menu label
     
     // Register and store the action ID for later reference
     int ret = g_rec->Register("custom_action", &action);
@@ -129,11 +132,26 @@ static void RegisterCommands() {
         gaccel_register_t accel;
         accel.accel.cmd = g_cmd_main_dialog;     // Bind to our action
         accel.accel.key = 'W';                   // Key: W
-        accel.accel.fVirt = FVIRTKEY | FCONTROL | FSHIFT;  // Modifiers: Ctrl+Shift
-        accel.desc = "";  // Empty desc - don't show duplicate in actions list
+        accel.accel.fVirt = FVIRTKEY | FCONTROL | FSHIFT;
+        accel.desc = "";
         g_rec->Register("gaccel", &accel);
+#ifdef FCOMMAND
+        gaccel_register_t accel_cmd;
+        accel_cmd.accel.cmd = g_cmd_main_dialog;
+        accel_cmd.accel.key = 'W';
+        accel_cmd.accel.fVirt = FVIRTKEY | FCOMMAND | FSHIFT;  // Cmd+Shift on macOS
+        accel_cmd.desc = "";
+        g_rec->Register("gaccel", &accel_cmd);
+
+        gaccel_register_t accel_cmd_lower;
+        accel_cmd_lower.accel.cmd = g_cmd_main_dialog;
+        accel_cmd_lower.accel.key = 'w';
+        accel_cmd_lower.accel.fVirt = FVIRTKEY | FCOMMAND | FSHIFT;
+        accel_cmd_lower.desc = "";
+        g_rec->Register("gaccel", &accel_cmd_lower);
+#endif
     }
-    
+
     Logger::Debug("RegisterCommands() complete");
 }
 

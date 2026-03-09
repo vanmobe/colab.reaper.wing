@@ -11,6 +11,7 @@
 #include <mutex>
 #include <cstddef>
 #include <set>
+#include <vector>
 
 class UdpListeningReceiveSocket;
 
@@ -148,6 +149,18 @@ public:
     // Additional Wing commands
     void GetConsoleInfo();
     void GetShowName();
+    void RequestMeterValue(const std::string& address_template, int channel_num);
+    double GetLastMeterLinearValue(int value_index = 0) const;
+    std::vector<double> GetLastMeterValues() const;
+    void StartSDRecorder();
+    void StopSDRecorder();
+    void SetUserControlLed(int layer, int button, bool on);
+    void SetUserControlColor(int layer, int button, int color_index);
+    void SetActiveUserControlLayer(int layer);
+    void SetUserControlRotaryName(int layer, int rotary, const std::string& name);
+    void QueryUserControlColor(int layer, int button);
+    void QueryUserControlRotaryText(int layer, int rotary);
+    int GetCachedUserControlColor(int layer, int button, int fallback = 2) const;
     
     // Handle OSC messages (public for listener callback)
     void HandleOscMessage(const std::string& address, const void* data, size_t size);
@@ -186,11 +199,14 @@ private:
     WingInfo wing_info_{};
     bool handshake_complete_ = false;
     mutable std::mutex log_mutex_;
+    std::string last_meter_address_;
+    std::vector<double> last_meter_values_;
     
     // OSC socket handles (oscpack)
     UdpListeningReceiveSocket* osc_socket_;
     WingOscListener* osc_listener_;
     std::mutex send_mutex_;
+    std::map<std::pair<int, int>, int> user_control_color_cache_;
     
     // Internal methods
     void ListenerThread();
