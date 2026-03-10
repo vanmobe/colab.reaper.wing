@@ -25,7 +25,7 @@ jobs:
             artifact_name: AUDIOLAB-Virtual-Soundcheck-Linux
 
     env:
-      VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '1.0.0-dev' }}
+      VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '1.1.0-dev' }}
 
     steps:
       - name: Checkout
